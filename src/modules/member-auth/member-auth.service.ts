@@ -25,13 +25,16 @@ export class MemberAuthService {
 
     try {
       return await this.entityManager.transaction(async (manager) => {
-        if (await this.memberService.findByNormalizedPhone(phone))
+        if (await manager.findOneBy(MemberEntity, { phone }))
           throw new BusinessException(ErrorEnum.MEMBER_PHONE_EXISTS)
 
         let parentId: number | null = null
         const inviteCode = dto.inviteCode?.trim().toLowerCase()
         if (inviteCode) {
-          const inviter = await this.memberService.findInviterByCode(inviteCode)
+          const inviter = await manager.findOne(MemberEntity, {
+            where: { inviteCode, status: MemberStatus.Enabled },
+            lock: { mode: 'pessimistic_read' },
+          })
           if (!inviter)
             throw new BusinessException(ErrorEnum.MEMBER_INVALID_INVITE_CODE)
           parentId = inviter.id

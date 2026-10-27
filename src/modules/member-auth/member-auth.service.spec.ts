@@ -18,6 +18,8 @@ describe('explicit member registration and phone login', () => {
   let sms: { consumeCode: jest.Mock }
   let memberService: MemberService
   let transaction: jest.Mock
+  let globalRepository: { findOneBy: jest.Mock }
+  let transactionManagers: { findOneBy: jest.Mock, findOne: jest.Mock }[]
   let saveError: Error | undefined
   const phone = '+8613800138000'
   const duplicate = (key: string) => new QueryFailedError('INSERT INTO member ...', [], {
@@ -28,16 +30,20 @@ describe('explicit member registration and phone login', () => {
 
   beforeEach(() => {
     rows = []
+    transactionManagers = []
     saveError = undefined
     let nextId = 100
-    const repository = {
-      findOneBy: async (where: Partial<MemberEntity>) => rows.find(row => Object.entries(where).every(([key, value]) => row[key] === value)) ?? null,
+    const findRow = (where: Partial<MemberEntity>) => rows.find(row => Object.entries(where).every(([key, value]) => row[key] === value)) ?? null
+    globalRepository = {
+      findOneBy: jest.fn(async (where: Partial<MemberEntity>) => findRow(where)),
     }
-    memberService = new MemberService(repository as unknown as Repository<MemberEntity>)
+    memberService = new MemberService(globalRepository as unknown as Repository<MemberEntity>)
     // Model transactional persistence, rollback, and commit-time unique enforcement.
     transaction = jest.fn(async (callback: (manager: EntityManager) => Promise<MemberEntity>) => {
       const pending: MemberEntity[] = []
       const manager = {
+        findOneBy: jest.fn(async (_target, where: Partial<MemberEntity>) => findRow(where)),
+        findOne: jest.fn(async (_target, options: { where: Partial<MemberEntity> }) => findRow(options.where)),
         create: (_target, input) => Object.assign(new MemberEntity(), input),
         save: async (member: MemberEntity) => {
           if (saveError)
@@ -47,6 +53,7 @@ describe('explicit member registration and phone login', () => {
           return member
         },
       }
+      transactionManagers.push(manager)
       const result = await callback(manager as unknown as EntityManager)
       for (const member of pending) {
         if (rows.some(row => row.phone === member.phone))
@@ -66,6 +73,46 @@ describe('explicit member registration and phone login', () => {
     expect(member.inviteCode).toMatch(/^[a-f0-9]{16}$/)
     expect(sms.consumeCode).toHaveBeenCalledWith(phone, 'register', '123456')
     expect(transaction).toHaveBeenCalledTimes(1)
+  })
+
+  it('reads the normalized phone through the callback manager without acquiring a global repository connection', async () => {
+    globalRepository.findOneBy.mockRejectedValue(new Error('No additional pool connection available'))
+
+    const member = await service.register({ phone: '0086 13800138000', code: '123456' })
+
+    expect(member.phone).toBe(phone)
+    expect(transactionManagers[0].findOneBy).toHaveBeenCalledWith(MemberEntity, { phone })
+    expect(globalRepository.findOneBy).not.toHaveBeenCalled()
+    expect(rows).toEqual([member])
+  })
+
+  it('validates and share-locks the enabled inviter through the supplied transaction manager', async () => {
+    rows.push(Object.assign(new MemberEntity(), { id: 7, phone: '+14155552671', status: MemberStatus.Enabled, inviteCode: 'abcdef0123456789' }))
+
+    const member = await service.register({ phone, code: '123456', inviteCode: ' ABCDEF0123456789 ' })
+
+    expect(member.parentId).toBe(7)
+    expect(transactionManagers[0].findOne).toHaveBeenCalledWith(MemberEntity, {
+      where: { inviteCode: 'abcdef0123456789', status: MemberStatus.Enabled },
+      lock: { mode: 'pessimistic_read' },
+    })
+    expect(globalRepository.findOneBy).not.toHaveBeenCalled()
+    expect(rows.find(row => row.phone === phone)?.parentId).toBe(7)
+  })
+
+  it.each([MemberStatus.Disable, MemberStatus.Cancelled])('rejects transaction-scoped inviter status %s even if a global lookup would return stale enabled data', async (status) => {
+    const inviter = Object.assign(new MemberEntity(), { id: 7, phone: '+14155552671', status, inviteCode: 'abcdef0123456789' })
+    rows.push(inviter)
+    globalRepository.findOneBy.mockImplementation(async (where: Partial<MemberEntity>) => where.inviteCode ? { ...inviter, status: MemberStatus.Enabled } : null)
+
+    await expect(service.register({ phone, code: '123456', inviteCode: 'abcdef0123456789' })).rejects.toMatchObject({ message: '邀请码无效或邀请人不可用' })
+
+    expect(rows).toEqual([inviter])
+    expect(transactionManagers[0].findOne).toHaveBeenCalledWith(MemberEntity, {
+      where: { inviteCode: 'abcdef0123456789', status: MemberStatus.Enabled },
+      lock: { mode: 'pessimistic_read' },
+    })
+    expect(globalRepository.findOneBy).not.toHaveBeenCalled()
   })
 
   it.each([undefined, '', '   '])('treats an empty optional invite %p as root registration', async (inviteCode) => {
