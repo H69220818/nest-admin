@@ -1,4 +1,4 @@
-import { CanActivate, ExecutionContext, Module, NotFoundException, ValidationPipe } from '@nestjs/common'
+import { CanActivate, ExecutionContext, HttpStatus, Module, NotFoundException, UnprocessableEntityException, ValidationPipe } from '@nestjs/common'
 import { PATH_METADATA } from '@nestjs/common/constants'
 import { APP_GUARD } from '@nestjs/core'
 import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify'
@@ -96,7 +96,17 @@ describe('member profile and admin management', () => {
       ],
     }).compile()
     app = module.createNestApplication<NestFastifyApplication>(new FastifyAdapter())
-    app.useGlobalPipes(new ValidationPipe({ transform: true, whitelist: true, forbidNonWhitelisted: true }))
+    app.useGlobalPipes(new ValidationPipe({
+      transform: true,
+      whitelist: true,
+      transformOptions: { enableImplicitConversion: true },
+      errorHttpStatusCode: HttpStatus.UNPROCESSABLE_ENTITY,
+      stopAtFirstError: true,
+      exceptionFactory: errors => new UnprocessableEntityException(errors.map((error) => {
+        const rule = Object.keys(error.constraints!)[0]
+        return error.constraints![rule]
+      })[0]),
+    }))
     await app.init()
     await app.getHttpAdapter().getInstance().ready()
   })
@@ -117,10 +127,12 @@ describe('member profile and admin management', () => {
     expect(rows[1].nickname).toBe('Member 99')
   })
 
-  it.each(['id', 'parentId', 'phone', 'inviteCode', 'status'])('rejects crafted profile %s at the HTTP boundary', async (field) => {
+  it.each(['id', 'parentId', 'phone', 'inviteCode', 'status'])('strips crafted profile %s while preserving immutable fields', async (field) => {
     const response = await app.inject({ method: 'PUT', url: '/member/profile', payload: { nickname: 'Tampered', [field]: 99 } })
-    expect(response.statusCode).toBe(400)
-    expect(rows[0]).toMatchObject({ nickname: 'Member 42', parentId: 7, phone: '+8613800138000', inviteCode: 'abcdef0123456789', status: MemberStatus.Enabled })
+    expect(response.statusCode).toBe(200)
+    expect(rows[0]).toMatchObject({ id: 42, nickname: 'Tampered', parentId: 7, phone: '+8613800138000', inviteCode: 'abcdef0123456789', status: MemberStatus.Enabled })
+    expect(repository.update).toHaveBeenCalledWith(42, { nickname: 'Tampered' })
+    expect(rows[1].nickname).toBe('Member 99')
   })
 
   it('allowlists mutable fields even when the profile service is called without validation', async () => {
@@ -136,6 +148,7 @@ describe('member profile and admin management', () => {
 
   it('marks every self-service endpoint as member-only and keeps exact admin permissions', () => {
     expect(Reflect.getMetadata(AUTH_ROUTE_KEY, MemberProfileController)).toBe('member')
+    expect(Reflect.getMetadata('swagger/apiSecurity', MemberProfileController)).toEqual([{ auth: [] }])
     expect(Reflect.getMetadata(PATH_METADATA, MemberController)).toBe('members')
     expect(Reflect.getMetadata(AUTH_ROUTE_KEY, MemberController)).toBeUndefined()
     for (const [method, permission] of [['list', 'member:list'], ['read', 'member:read'], ['updateStatus', 'member:update-status']]) {
@@ -187,11 +200,20 @@ describe('member profile and admin management', () => {
     expect(tokens.revokeAll).not.toHaveBeenCalled()
   })
 
-  it.each([{ status: 9 }, { status: 0, parentId: 99 }, { status: 0, phone: 'changed' }, { status: 0, inviteCode: 'changed' }])('rejects invalid admin payload %p', async (payload) => {
+  it('rejects invalid admin status with production validation', async () => {
+    const payload = { status: 9 }
     const response = await app.inject({ method: 'PUT', url: '/members/42/status', payload })
-    expect(response.statusCode).toBe(400)
+    expect(response.statusCode).toBe(422)
     expect(rows[0]).toMatchObject({ status: MemberStatus.Enabled, parentId: 7, inviteCode: 'abcdef0123456789' })
     expect(sessions).toEqual([42, 42, 99])
+  })
+
+  it.each(['id', 'parentId', 'phone', 'inviteCode'])('strips crafted admin %s while applying the authorized status change', async (field) => {
+    const response = await app.inject({ method: 'PUT', url: '/members/42/status', payload: { status: 0, [field]: 99 } })
+    expect(response.statusCode).toBe(200)
+    expect(rows[0]).toMatchObject({ id: 42, status: MemberStatus.Disable, parentId: 7, phone: '+8613800138000', inviteCode: 'abcdef0123456789' })
+    expect(repository.update).toHaveBeenCalledWith(42, { status: MemberStatus.Disable })
+    expect(sessions).toEqual([99])
   })
 
   it('does not revoke sessions after a failed database update', async () => {

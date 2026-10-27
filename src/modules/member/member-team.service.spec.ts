@@ -1,4 +1,4 @@
-import { CanActivate, ExecutionContext, ValidationPipe } from '@nestjs/common'
+import { CanActivate, ExecutionContext, HttpStatus, UnprocessableEntityException, ValidationPipe } from '@nestjs/common'
 import { APP_GUARD } from '@nestjs/core'
 import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify'
 import { Test } from '@nestjs/testing'
@@ -11,7 +11,7 @@ import { MemberTeamService } from './member-team.service'
 import { MemberEntity } from './member.entity'
 
 // Query-boundary tests stay compatible with the project's Node >=20 runtime.
-// The ignored task report records the separate live MySQL fixture verification.
+// The optional member-flow.e2e-spec.ts runs the recursive queries against MySQL 8.
 describe('member team query boundary', () => {
   let service: MemberTeamService
   let repository: { createQueryBuilder: jest.Mock, query: jest.Mock }
@@ -176,7 +176,17 @@ describe('member-owned team HTTP boundary', () => {
       ],
     }).compile()
     app = module.createNestApplication<NestFastifyApplication>(new FastifyAdapter())
-    app.useGlobalPipes(new ValidationPipe({ transform: true, whitelist: true, forbidNonWhitelisted: true }))
+    app.useGlobalPipes(new ValidationPipe({
+      transform: true,
+      whitelist: true,
+      transformOptions: { enableImplicitConversion: true },
+      errorHttpStatusCode: HttpStatus.UNPROCESSABLE_ENTITY,
+      stopAtFirstError: true,
+      exceptionFactory: errors => new UnprocessableEntityException(errors.map((error) => {
+        const rule = Object.keys(error.constraints!)[0]
+        return error.constraints![rule]
+      })[0]),
+    }))
     await app.init()
     await app.getHttpAdapter().getInstance().ready()
   })
@@ -213,11 +223,14 @@ describe('member-owned team HTTP boundary', () => {
     'maxDepth=101',
     'maxDepth=1.5',
     'maxDepth=2x',
-    'memberId=99',
-    'id=99',
   ])('rejects malformed or out-of-bounds descendants query %s', async (query) => {
-    expect((await app.inject({ method: 'GET', url: `/member/team/descendants?${query}` })).statusCode).toBe(400)
+    expect((await app.inject({ method: 'GET', url: `/member/team/descendants?${query}` })).statusCode).toBe(422)
     expect(calls).toHaveLength(0)
+  })
+
+  it.each(['id', 'memberId', 'parentId'])('strips crafted team %s and queries only the authenticated member', async (field) => {
+    expect((await app.inject({ method: 'GET', url: `/member/team/descendants?${field}=99` })).statusCode).toBe(200)
+    expect(calls[0]).toEqual([42, 10, expect.not.objectContaining({ [field]: expect.anything() })])
   })
 
   it('passes validated numeric paging and depth', async () => {

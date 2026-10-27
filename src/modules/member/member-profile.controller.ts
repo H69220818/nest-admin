@@ -2,6 +2,7 @@ import { Body, Controller, Get, Put } from '@nestjs/common'
 import { ApiOperation, ApiTags } from '@nestjs/swagger'
 
 import { ApiResult } from '~/common/decorators/api-result.decorator'
+import { ApiSecurityAuth } from '~/common/decorators/swagger.decorator'
 import { MemberAuth } from '~/modules/member-auth/decorators/member-auth.decorator'
 import { MemberUser } from '~/modules/member-auth/decorators/member-user.decorator'
 
@@ -10,6 +11,7 @@ import { MemberInfo, MemberInviteInfo } from './member.model'
 import { MemberService } from './member.service'
 
 @ApiTags('Member - 会员资料')
+@ApiSecurityAuth()
 @MemberAuth()
 @Controller('member')
 export class MemberProfileController {
