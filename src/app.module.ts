@@ -20,6 +20,7 @@ import { JwtAuthGuard } from './modules/auth/guards/jwt-auth.guard'
 import { RbacGuard } from './modules/auth/guards/rbac.guard'
 import { HealthModule } from './modules/health/health.module'
 import { MemberAuthModule } from './modules/member-auth/member-auth.module'
+import { MemberSocialModule } from './modules/member-social/member-social.module'
 import { NetdiskModule } from './modules/netdisk/netdisk.module'
 import { SseModule } from './modules/sse/sse.module'
 import { SystemModule } from './modules/system/system.module'
@@ -59,6 +60,7 @@ import { SocketModule } from './socket/socket.module'
 
     AuthModule,
     MemberAuthModule,
+    MemberSocialModule,
     SystemModule,
     TasksModule.forRoot(),
     ToolsModule,
