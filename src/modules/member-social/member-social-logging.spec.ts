@@ -2,6 +2,7 @@ import { BadRequestException, HttpStatus, Logger, UnprocessableEntityException, 
 import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify'
 import { Test } from '@nestjs/testing'
 
+import { BusinessException } from '~/common/exceptions/biz.exception'
 import { AllExceptionsFilter } from '~/common/filters/any-exception.filter'
 import { LoggingInterceptor } from '~/common/interceptors/logging.interceptor'
 
@@ -14,6 +15,7 @@ describe('member OAuth callback logging', () => {
   let warn: jest.SpyInstance
   const consumeOAuthCallback = jest.fn()
   const loginMiniapp = jest.fn()
+  const bindMiniapp = jest.fn()
   const rejectionListeners = process.listeners('unhandledRejection')
   const exceptionListeners = process.listeners('uncaughtException')
   const state = 'a'.repeat(64)
@@ -22,7 +24,7 @@ describe('member OAuth callback logging', () => {
   beforeAll(async () => {
     const module = await Test.createTestingModule({
       controllers: [MemberSocialController],
-      providers: [{ provide: MemberSocialService, useValue: { consumeOAuthCallback, loginMiniapp } }],
+      providers: [{ provide: MemberSocialService, useValue: { consumeOAuthCallback, loginMiniapp, bindMiniapp } }],
     }).compile()
     app = module.createNestApplication<NestFastifyApplication>(new FastifyAdapter())
     app.useGlobalInterceptors(new LoggingInterceptor())
@@ -42,6 +44,7 @@ describe('member OAuth callback logging', () => {
   beforeEach(() => {
     consumeOAuthCallback.mockReset()
     loginMiniapp.mockReset()
+    bindMiniapp.mockReset()
     debug = jest.spyOn(Logger.prototype, 'debug').mockImplementation(() => undefined)
     warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined)
   })
@@ -79,7 +82,7 @@ describe('member OAuth callback logging', () => {
 
   it('redacts callback service errors without changing the error response or service inputs', async () => {
     consumeOAuthCallback.mockRejectedValueOnce(new BadRequestException('OAuth state invalid or expired'))
-    const response = await app.inject({ url: `/member/auth/wechat/callback?code=service-secret-code&state=${state}&${safeQuery}` })
+    const response = await app.inject({ url: `/member/auth/wechat/callback?code=service-secret-code&state=${state}&${safeQuery}`, headers: { 'content-type': 'application/json' } })
 
     expect(response.statusCode).toBe(400)
     expect(response.json()).toEqual({ code: 400, message: 'OAuth state invalid or expired', data: null })
@@ -129,10 +132,45 @@ describe('member OAuth callback logging', () => {
     const code = failure === 'validation' ? 'invalid secret body code' : 'secret-body-code'
     const response = await app.inject({ method: 'POST', url: '/member/auth/wechat-miniapp?code=secret-query-code', payload: { code } })
     expect(response.statusCode).toBe(failure === 'validation' ? 422 : 400)
+    if (failure === 'service')
+      expect(response.json()).toEqual({ code: 400, message: '微信小程序授权码无效或已使用', data: null })
+    else
+      expect(response.json().message).toContain('code must match')
     expect(debug).toHaveBeenCalledTimes(1)
     expect(warn).toHaveBeenCalledTimes(1)
     const output = JSON.stringify([...debug.mock.calls, ...warn.mock.calls])
     expect(output).toContain('code=[REDACTED]')
     expect(output).not.toMatch(/secret-query-code|secret-body-code|invalid secret body code/)
+  })
+
+  it.each([
+    ['/member/auth/wechat-miniapp', '{"code":wxsecret}'],
+    ['/member/auth/wechat-miniapp', '{"code":"wxsecret",}'],
+    ['/member/auth/wechat-miniapp', '{"code":"wxsecret"'],
+    ['/member/social/wechat-miniapp/bind', '{"code":wxsecret}'],
+    ['/member/social/wechat-miniapp/bind', '{"code":"wxsecret",}'],
+    ['/member/social/wechat-miniapp/bind', '{"code":"wxsecret"'],
+  ])('normalizes malformed JSON on %s without logging or returning its body %s', async (url, payload) => {
+    const errorLog = jest.spyOn(Logger, 'error').mockImplementation(() => undefined)
+    const response = await app.inject({ method: 'POST', url, headers: { 'content-type': 'application/json' }, payload })
+    const logs = JSON.stringify([...debug.mock.calls, ...warn.mock.calls, ...errorLog.mock.calls])
+
+    expect(response.statusCode).toBe(400)
+    expect(response.body).not.toContain('wxsecret')
+    expect(logs).not.toContain('wxsecret')
+    expect(response.json()).toEqual({ code: 400, message: '请求 JSON 格式无效', data: null })
+    expect(warn).toHaveBeenCalledWith(`错误信息：(400) 请求 JSON 格式无效 Path: ${url}`)
+    expect(debug).not.toHaveBeenCalled()
+    expect(errorLog).not.toHaveBeenCalled()
+    expect(loginMiniapp).not.toHaveBeenCalled()
+    expect(bindMiniapp).not.toHaveBeenCalled()
+  })
+
+  it('preserves ordinary business errors after a valid JSON body was parsed', async () => {
+    loginMiniapp.mockRejectedValueOnce(new BusinessException('2001:会员绑定操作失败'))
+    const response = await app.inject({ method: 'POST', url: '/member/auth/wechat-miniapp', payload: { code: 'valid-code' } })
+    expect(response.statusCode).toBe(200)
+    expect(response.json()).toEqual({ code: 2001, message: '会员绑定操作失败', data: null })
+    expect(warn).toHaveBeenCalledWith('错误信息：(200) 会员绑定操作失败 Path: /member/auth/wechat-miniapp')
   })
 })

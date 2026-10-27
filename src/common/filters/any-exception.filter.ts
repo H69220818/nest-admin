@@ -38,7 +38,14 @@ export class AllExceptionsFilter implements ExceptionFilter {
     const url = redactRequestUrl(request.raw.url!)
 
     const status = this.getStatus(exception)
-    let message = this.getErrorMessage(exception)
+    const contentType = request.headers['content-type']?.split(';', 1)[0].trim().toLowerCase()
+    // Nest wraps parser SyntaxErrors as BadRequestException, retaining body excerpts.
+    // A failed JSON parser leaves body undefined; valid JSON (including null) does not.
+    const invalidJsonBody = status === HttpStatus.BAD_REQUEST
+      && !['GET', 'HEAD'].includes(request.method)
+      && request.body === undefined
+      && (contentType === 'application/json' || contentType?.endsWith('+json'))
+    let message = invalidJsonBody ? '请求 JSON 格式无效' : this.getErrorMessage(exception)
 
     // 系统内部错误时
     if (
