@@ -19,6 +19,7 @@ import { AppModule } from './app.module'
 import { fastifyApp } from './common/adapters/fastify.adapter'
 import { RedisIoAdapter } from './common/adapters/socket.adapter'
 import { LoggingInterceptor } from './common/interceptors/logging.interceptor'
+import { appCorsOptions } from './config'
 import { isDev, isMainProcess } from './global/env'
 import { setupSwagger } from './setup-swagger'
 import { LoggerService } from './shared/logger/logger.service'
@@ -44,12 +45,7 @@ async function bootstrap() {
   useContainer(app.select(AppModule), { fallbackOnErrors: true })
 
   // 允许跨域
-  app.enableCors({
-    origin: '*',
-    credentials: true,
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'], // 明确允许方法
-    allowedHeaders: ['Content-Type', 'Authorization', 'Accept'], // 按需配置允许的请求头
-  })
+  app.enableCors(appCorsOptions)
 
   app.setGlobalPrefix(globalPrefix)
   app.useStaticAssets({ root: path.join(__dirname, '..', 'public') })

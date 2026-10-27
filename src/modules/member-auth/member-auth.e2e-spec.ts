@@ -9,7 +9,7 @@ import { getRepositoryToken } from '@nestjs/typeorm'
 import { EntityManager, Repository } from 'typeorm'
 
 import { REDIS_CLIENT } from '~/common/decorators/inject-redis.decorator'
-import { AppConfig, SecurityConfig } from '~/config'
+import { AppConfig, appCorsOptions, SecurityConfig } from '~/config'
 import { MemberAuthConfig } from '~/config/member-auth.config'
 import { PERMISSION_KEY } from '~/modules/auth/auth.constant'
 import { AuthService } from '~/modules/auth/auth.service'
@@ -226,6 +226,7 @@ describe('member authentication HTTP routing', () => {
       .compile()
     tokens = module.get(MemberTokenService)
     app = module.createNestApplication<NestFastifyApplication>(new FastifyAdapter())
+    app.enableCors(appCorsOptions)
     app.useGlobalPipes(new ValidationPipe({ transform: true, whitelist: true }))
     await app.init()
     await app.getHttpAdapter().getInstance().ready()
@@ -240,6 +241,24 @@ describe('member authentication HTTP routing', () => {
   })
 
   const bearer = (token: string) => ({ authorization: `Bearer ${token}` })
+
+  it('allows browser SMS preflights with device metadata', async () => {
+    const response = await app.inject({
+      method: 'OPTIONS',
+      url: '/member/auth/sms/register',
+      headers: {
+        'origin': 'https://member.example',
+        'access-control-request-method': 'POST',
+        'access-control-request-headers': 'content-type,x-device-id',
+      },
+    })
+    expect(response.statusCode).toBe(204)
+    expect(response.headers['access-control-allow-origin']).toBe('*')
+    expect(String(response.headers['access-control-allow-methods']).split(/,\s*/)).toContain('POST')
+    expect(String(response.headers['access-control-allow-headers']).toLowerCase().split(/,\s*/)).toEqual(
+      expect.arrayContaining(['content-type', 'x-device-id']),
+    )
+  })
 
   it('authenticates persisted member tokens exclusively into request.member', async () => {
     const pair = await tokens.issue(store.addMember().id)
