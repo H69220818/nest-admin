@@ -3,6 +3,7 @@ import 'fastify'
 declare module 'fastify' {
   interface FastifyRequest {
     user?: IAuthUser
+    member?: IMemberAuthUser
     accessToken: string
   }
 }

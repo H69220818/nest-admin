@@ -9,6 +9,7 @@ import { FastifyRequest } from 'fastify'
 import { BusinessException } from '~/common/exceptions/biz.exception'
 import { ErrorEnum } from '~/constants/error-code.constant'
 import { AuthService } from '~/modules/auth/auth.service'
+import { AUTH_ROUTE_KEY, AuthRouteType } from '~/modules/member-auth/decorators/member-auth.decorator'
 
 import { ALLOW_ANON_KEY, PERMISSION_KEY, PUBLIC_KEY, Roles } from '../auth.constant'
 
@@ -20,7 +21,14 @@ export class RbacGuard implements CanActivate {
   ) {}
 
   async canActivate(context: ExecutionContext): Promise<any> {
-    const isPublic = this.reflector.getAllAndOverride<boolean>(PUBLIC_KEY, [
+    const route = this.reflector.getAllAndOverride<AuthRouteType>(AUTH_ROUTE_KEY, [
+      context.getHandler(),
+      context.getClass(),
+    ])
+    if (route === 'public' || route === 'member')
+      return true
+
+    const isPublic = !route && this.reflector.getAllAndOverride<boolean>(PUBLIC_KEY, [
       context.getHandler(),
       context.getClass(),
     ])

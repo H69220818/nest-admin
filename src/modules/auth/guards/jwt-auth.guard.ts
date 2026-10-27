@@ -19,6 +19,8 @@ import { ErrorEnum } from '~/constants/error-code.constant'
 import { genTokenBlacklistKey } from '~/helper/genRedisKey'
 
 import { AuthService } from '~/modules/auth/auth.service'
+import { AUTH_ROUTE_KEY, AuthRouteType } from '~/modules/member-auth/decorators/member-auth.decorator'
+import { MemberJwtAuthGuard } from '~/modules/member-auth/member-jwt-auth.guard'
 
 import { checkIsDemoMode } from '~/utils'
 
@@ -46,18 +48,32 @@ export class JwtAuthGuard extends AuthGuard(AuthStrategy.JWT) {
     private tokenService: TokenService,
     @InjectRedis() private readonly redis: Redis,
     @Inject(AppConfig.KEY) private appConfig: IAppConfig,
+    private readonly memberGuard: MemberJwtAuthGuard,
   ) {
     super()
   }
 
   async canActivate(context: ExecutionContext): Promise<any> {
-    const isPublic = this.reflector.getAllAndOverride<boolean>(PUBLIC_KEY, [
+    const route = this.reflector.getAllAndOverride<AuthRouteType>(AUTH_ROUTE_KEY, [
+      context.getHandler(),
+      context.getClass(),
+    ])
+    // Explicit public auth routes bypass demo write blocking and both audiences.
+    if (route === 'public')
+      return true
+
+    const isPublic = !route && this.reflector.getAllAndOverride<boolean>(PUBLIC_KEY, [
       context.getHandler(),
       context.getClass(),
     ])
     const request = context.switchToHttp().getRequest<FastifyRequest<RequestType>>()
+    if (route === 'member') {
+      if (request.method !== 'GET')
+        checkIsDemoMode()
+      return this.memberGuard.canActivate(context)
+    }
     // const response = context.switchToHttp().getResponse<FastifyReply>()
-    if (RouterWhiteList.includes(request.routeOptions.url))
+    if (!route && RouterWhiteList.includes(request.routeOptions.url))
       return true
     // TODO 此处代码的作用是判断如果在演示环境下，则拒绝用户的增删改操作，去掉此代码不影响正常的业务逻辑
     if (request.method !== 'GET' && !request.url.includes('/auth/login'))
