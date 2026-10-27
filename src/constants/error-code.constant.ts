@@ -45,4 +45,12 @@ export enum ErrorEnum {
   OSS_FILE_OR_DIR_EXIST = '1401:当前创建的文件或目录已存在',
   OSS_NO_OPERATION_REQUIRED = '1402:无需操作',
   OSS_EXCEE_MAXIMUM_QUANTITY = '1403:已超出支持的最大处理数量',
+
+  MEMBER_NOT_FOUND = '2001:会员不存在或不可用',
+  MEMBER_INVALID_CREDENTIALS = '2002:手机号或验证码不正确',
+  MEMBER_PHONE_EXISTS = '2003:手机号已注册',
+  MEMBER_INVALID_INVITE_CODE = '2004:邀请码无效或邀请人不可用',
+  MEMBER_SMS_CODE_INVALID = '2005:验证码无效或已过期',
+  MEMBER_SMS_RATE_LIMITED = '2006:验证码发送过于频繁，请稍后再试',
+  MEMBER_SMS_SEND_FAILED = '2007:验证码发送失败',
 }
