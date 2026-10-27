@@ -42,6 +42,13 @@ export class MemberUnbindDto {
   code: string
 }
 
+export class MemberMiniappCodeDto {
+  @ApiProperty({ description: 'wx.login() 返回的一次性授权码' })
+  @IsString()
+  @Matches(/^[\w-]{1,512}$/)
+  code: string
+}
+
 @ApiTags('Member - 第三方身份')
 @Controller('member')
 export class MemberSocialController {
@@ -71,6 +78,23 @@ export class MemberSocialController {
   callback(@Query() dto: MemberOAuthCallbackDto) {
     // No token-bearing redirects. The frontend consumes this JSON response and returnUrl.
     return this.social.consumeOAuthCallback(dto.code, dto.state)
+  }
+
+  @Post('auth/wechat-miniapp')
+  @PublicAuth()
+  @Header('Cache-Control', 'no-store')
+  @ApiOperation({ summary: '微信小程序登录；仅允许已绑定身份登录，不创建会员' })
+  loginMiniapp(@Body() dto: MemberMiniappCodeDto) {
+    return this.social.loginMiniapp(dto.code)
+  }
+
+  @Post('social/wechat-miniapp/bind')
+  @MemberAuth()
+  @ApiSecurityAuth()
+  @Header('Cache-Control', 'no-store')
+  @ApiOperation({ summary: '使用一次性小程序授权码为当前会员绑定微信身份' })
+  bindMiniapp(@MemberUser() member: IMemberAuthUser, @Body() dto: MemberMiniappCodeDto) {
+    return this.social.bindMiniapp(Number(member.sub), dto.code)
   }
 
   @Get('social')

@@ -36,6 +36,8 @@ describe('member social HTTP boundary', () => {
       listBindings: jest.fn(async () => []),
       sendUnbindCode: jest.fn(async () => ({ success: true })),
       unbindIdentity: jest.fn(async () => undefined),
+      bindMiniapp: jest.fn(async () => ({ id: 1, provider: 'wechat_miniapp', tenant: 'wx-miniapp' })),
+      loginMiniapp: jest.fn(async () => ({ accessToken: 'member-access', refreshToken: 'member-refresh' })),
     }
     const principal = { sub: '42', aud: 'member', tokenType: 'access', sessionId: 'session', pv: 1 }
     memberToken = await new JwtService().signAsync(principal, { secret, expiresIn: 900 })
@@ -81,6 +83,7 @@ describe('member social HTTP boundary', () => {
 
   it.each([
     ['POST', '/member/social/wechat-oauth/bind-url'],
+    ['POST', '/member/social/wechat-miniapp/bind'],
     ['GET', '/member/social'],
     ['POST', '/member/social/unbind-sms'],
     ['DELETE', '/member/social/wechat_oauth'],
@@ -100,6 +103,39 @@ describe('member social HTTP boundary', () => {
     const response = await app.inject({ method: 'POST', url: '/member/social/wechat-oauth/bind-url', headers: bearer(memberToken), payload: { returnUrl: 'https://member.example/profile', memberId: 99, intent: 'login', appId: 'evil' } })
     expect(response.statusCode).toBe(201)
     expect(service.createOAuthState).toHaveBeenCalledWith(42, 'bind', 'https://member.example/profile')
+  })
+
+  it('binds miniapp using request.member and only the code despite crafted identity fields', async () => {
+    const response = await app.inject({ method: 'POST', url: '/member/social/wechat-miniapp/bind', headers: bearer(memberToken), payload: { code: 'wx-login-code', memberId: 99, openid: 'forged-openid', unionid: 'forged-unionid', tenant: 'forged-tenant' } })
+    expect(response.statusCode).toBe(201)
+    expect(response.json()).toEqual({ id: 1, provider: 'wechat_miniapp', tenant: 'wx-miniapp' })
+    expect(service.bindMiniapp).toHaveBeenCalledWith(42, 'wx-login-code')
+    expect(response.headers['cache-control']).toBe('no-store')
+  })
+
+  it('rejects administrator tokens for miniapp binding', async () => {
+    const adminToken = await new JwtService().signAsync({ uid: 99, pv: 1 }, { secret: 'independent-admin-secret-at-least-32-characters' })
+    const response = await app.inject({ method: 'POST', url: '/member/social/wechat-miniapp/bind', headers: bearer(adminToken), payload: { code: 'wx-login-code' } })
+    expect(response.statusCode).toBe(401)
+    expect(service.bindMiniapp).not.toHaveBeenCalled()
+  })
+
+  it('allows public miniapp login in demo mode using only the code', async () => {
+    process.env.IS_DEMO = 'true'
+    const response = await app.inject({ method: 'POST', url: '/member/auth/wechat-miniapp', payload: { code: 'wx-login-code', memberId: 99, openid: 'forged-openid', unionid: 'forged-unionid' } })
+    expect(response.statusCode).toBe(201)
+    expect(response.json()).toEqual({ accessToken: 'member-access', refreshToken: 'member-refresh' })
+    expect(service.loginMiniapp).toHaveBeenCalledWith('wx-login-code')
+    expect(response.headers['cache-control']).toBe('no-store')
+  })
+
+  it.each([{}, { openid: 'forged-openid', unionid: 'forged-unionid' }, { code: '' }, { code: 'invalid code' }, { code: 'a'.repeat(513) }, { code: ['code'] }])('rejects invalid miniapp input %p before calling the service', async (payload) => {
+    for (const url of ['/member/auth/wechat-miniapp', '/member/social/wechat-miniapp/bind']) {
+      const response = await app.inject({ method: 'POST', url, headers: bearer(memberToken), payload })
+      expect(response.statusCode).toBe(422)
+    }
+    expect(service.bindMiniapp).not.toHaveBeenCalled()
+    expect(service.loginMiniapp).not.toHaveBeenCalled()
   })
 
   it('allows public login authorization in demo mode and ignores crafted member/intent', async () => {
@@ -154,8 +190,9 @@ describe('member social HTTP boundary', () => {
 
   it('documents authentication on all protected routes but leaves login/callback public', () => {
     const doc = SwaggerModule.createDocument(app, new DocumentBuilder().addBearerAuth(undefined, 'auth').build())
-    for (const [path, method] of [['/member/social/wechat-oauth/bind-url', 'post'], ['/member/social', 'get'], ['/member/social/unbind-sms', 'post'], ['/member/social/{provider}', 'delete']])
+    for (const [path, method] of [['/member/social/wechat-oauth/bind-url', 'post'], ['/member/social/wechat-miniapp/bind', 'post'], ['/member/social', 'get'], ['/member/social/unbind-sms', 'post'], ['/member/social/{provider}', 'delete']])
       expect(doc.paths[path][method].security).toEqual([{ auth: [] }])
+    expect(doc.paths['/member/auth/wechat-miniapp'].post.security ?? []).toEqual([])
     expect(doc.paths['/member/auth/wechat/oauth-url'].post.security ?? []).toEqual([])
     expect(doc.paths['/member/auth/wechat/callback'].get.security ?? []).toEqual([])
   })

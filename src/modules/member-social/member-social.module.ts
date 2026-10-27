@@ -9,12 +9,13 @@ import { MemberAuthModule } from '~/modules/member-auth/member-auth.module'
 import { MemberIdentityEntity } from './member-identity.entity'
 import { MemberSocialController } from './member-social.controller'
 import { MemberSocialService } from './member-social.service'
+import { WechatMiniappProvider } from './providers/wechat-miniapp.provider'
 import { WechatOAuthProvider } from './providers/wechat-oauth.provider'
 
 @Module({
   imports: [ConfigModule.forFeature(WechatConfig), TypeOrmModule.forFeature([MemberIdentityEntity]), HttpModule, MemberAuthModule],
   controllers: [MemberSocialController],
-  providers: [MemberSocialService, WechatOAuthProvider],
+  providers: [MemberSocialService, WechatOAuthProvider, WechatMiniappProvider],
   exports: [MemberSocialService],
 })
 export class MemberSocialModule {}

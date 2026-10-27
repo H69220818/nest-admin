@@ -1,4 +1,4 @@
-import { BadRequestException, ConflictException, NotFoundException, UnauthorizedException } from '@nestjs/common'
+import { BadGatewayException, BadRequestException, ConflictException, NotFoundException, ServiceUnavailableException, UnauthorizedException } from '@nestjs/common'
 import Redis from 'ioredis'
 import { EntityManager, FindOperator, QueryFailedError } from 'typeorm'
 
@@ -11,10 +11,11 @@ import { MemberEntity } from '~/modules/member/member.entity'
 import { MemberIdentityEntity } from './member-identity.entity'
 import { MemberSocialService } from './member-social.service'
 import { NormalizedSocialIdentity } from './providers/member-social-provider'
+import { WechatMiniappProvider } from './providers/wechat-miniapp.provider'
 import { WechatOAuthProvider } from './providers/wechat-oauth.provider'
 
 describe('memberSocialService', () => {
-  const config: IWechatConfig = { enabled: true, mode: 'website', appId: 'wx-app', appSecret: 'secret', callbackUrl: 'https://api.example/callback', scope: 'snsapi_login', returnOrigins: ['https://member.example'], stateTtlSeconds: 600, httpTimeoutMs: 5000 }
+  const config: IWechatConfig = { enabled: true, mode: 'website', appId: 'wx-app', appSecret: 'secret', callbackUrl: 'https://api.example/callback', scope: 'snsapi_login', returnOrigins: ['https://member.example'], stateTtlSeconds: 600, httpTimeoutMs: 5000, miniapp: { enabled: true, appId: 'wx-miniapp', appSecret: 'mini-secret', codeTtlSeconds: 300, httpTimeoutMs: 5000 } }
   const identity: NormalizedSocialIdentity = { provider: MemberIdentityProvider.WechatOAuth, tenant: 'wx-app', subject: 'openid-1', unionId: 'union-1', profile: { displayName: 'Alice', avatar: 'https://image.example/avatar' } }
   let service: MemberSocialService
   let members: MemberEntity[]
@@ -24,6 +25,8 @@ describe('memberSocialService', () => {
   let manager: { findOne: jest.Mock, find: jest.Mock, create: jest.Mock, save: jest.Mock, delete: jest.Mock }
   let root: { transaction: jest.Mock }
   let provider: WechatOAuthProvider
+  let miniapp: WechatMiniappProvider
+  let miniappGet: jest.Mock
   let issue: jest.Mock
   let consumeCode: jest.Mock
   let sendCode: jest.Mock
@@ -69,16 +72,134 @@ describe('memberSocialService', () => {
     }
     provider = new WechatOAuthProvider(config, {} as any)
     jest.spyOn(provider, 'exchangeCode').mockResolvedValue(identity)
+    miniappGet = jest.fn().mockResolvedValue({ data: { openid: 'mini-openid', unionid: 'union-1', session_key: 'private-mini-session-key' } })
+    miniapp = new WechatMiniappProvider(config, { axiosRef: { get: miniappGet } } as any)
     issue = jest.fn(async id => ({ accessToken: `member-access-${id}`, refreshToken: `member-refresh-${id}` }))
     consumeCode = jest.fn(async (phone, purpose, code) => {
       if (code !== '123456' || purpose !== 'unbind')
         throw new BadRequestException('Invalid SMS code')
     })
     sendCode = jest.fn(async () => ({ success: true }))
-    service = new MemberSocialService(config, redis as unknown as Redis, root as unknown as EntityManager, provider, { issue } as unknown as MemberTokenService, { consumeCode, sendCode } as unknown as SmsCodeService)
+    service = new MemberSocialService(config, redis as unknown as Redis, root as unknown as EntityManager, provider, { issue } as unknown as MemberTokenService, { consumeCode, sendCode } as unknown as SmsCodeService, miniapp)
   })
 
   const getState = (result: { authorizationUrl: string }) => new URL(result.authorizationUrl).searchParams.get('state')!
+
+  it('binds a server-exchanged miniapp identity and persists no session key or code', async () => {
+    const binding = await service.bindMiniapp(1, 'private-wx-login-code')
+    expect(binding).toMatchObject({ provider: 'wechat_miniapp', tenant: 'wx-miniapp' })
+    expect(identities).toHaveLength(1)
+    expect(identities[0]).toMatchObject({ memberId: 1, provider: 'wechat_miniapp', providerTenant: 'wx-miniapp', providerSubject: 'mini-openid', unionId: 'union-1' })
+    expect(JSON.stringify([binding, identities, [...states]])).not.toMatch(/session_key|private-mini-session-key|private-wx-login-code|mini-secret/)
+    const [[key, reservation]] = [...states]
+    expect(key).toMatch(/^member:social:miniapp:code:wx-miniapp:[a-f0-9]{64}$/)
+    expect(reservation.value).toBe('1')
+    expect(reservation.expires - Date.now()).toBeGreaterThan(290000)
+    expect(reservation.expires - Date.now()).toBeLessThanOrEqual(300000)
+  })
+
+  it('logs in the exact bound miniapp identity using member token issuance', async () => {
+    await service.bindMiniapp(1, 'bind-code')
+    expect(await service.loginMiniapp('fresh-login-code')).toEqual({ accessToken: 'member-access-1', refreshToken: 'member-refresh-1' })
+    expect(issue).toHaveBeenCalledWith(1)
+  })
+
+  it('rejects unknown miniapp identity without creating a member or issuing tokens', async () => {
+    await expect(service.loginMiniapp('unknown-code')).rejects.toBeInstanceOf(UnauthorizedException)
+    expect(members).toHaveLength(2)
+    expect(identities).toHaveLength(0)
+    expect(manager.create).not.toHaveBeenCalled()
+    expect(issue).not.toHaveBeenCalled()
+  })
+
+  it('atomically reserves the code across concurrent bind and login before WeChat exchange', async () => {
+    const results = await Promise.allSettled([service.bindMiniapp(1, 'shared-code'), service.loginMiniapp('shared-code')])
+    expect(results.map(result => result.status).sort()).toEqual(['fulfilled', 'rejected'])
+    expect((results.find(result => result.status === 'rejected') as PromiseRejectedResult).reason).toBeInstanceOf(BadRequestException)
+    expect(miniappGet).toHaveBeenCalledTimes(1)
+    expect(identities).toHaveLength(1)
+  })
+
+  it('keeps the local replay reservation after upstream errors', async () => {
+    miniappGet.mockRejectedValue(new Error('private-mini-session-key'))
+    await expect(service.loginMiniapp('failed-code')).rejects.toBeInstanceOf(BadGatewayException)
+    await expect(service.loginMiniapp('failed-code')).rejects.toBeInstanceOf(BadRequestException)
+    expect(miniappGet).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps the local replay reservation after an unknown identity is rejected', async () => {
+    await expect(service.loginMiniapp('unknown-code')).rejects.toBeInstanceOf(UnauthorizedException)
+    await expect(service.bindMiniapp(1, 'unknown-code')).rejects.toBeInstanceOf(BadRequestException)
+    expect(miniappGet).toHaveBeenCalledTimes(1)
+  })
+
+  it('namespaces replay reservations by configured miniapp tenant', async () => {
+    await expect(service.loginMiniapp('same-code')).rejects.toBeInstanceOf(UnauthorizedException)
+    const otherConfig = { ...config, miniapp: { ...config.miniapp, appId: 'wx-other' } }
+    const other = new MemberSocialService(otherConfig, redis as any, root as any, provider, { issue } as any, { consumeCode, sendCode } as any, new WechatMiniappProvider(otherConfig, { axiosRef: { get: miniappGet } } as any))
+    await expect(other.loginMiniapp('same-code')).rejects.toBeInstanceOf(UnauthorizedException)
+    expect(miniappGet).toHaveBeenCalledTimes(2)
+    expect([...states.keys()]).toEqual([expect.stringContaining(':wx-miniapp:'), expect.stringContaining(':wx-other:')])
+  })
+
+  it('rejects a concurrent cross-member bind through the shared unique constraints', async () => {
+    const results = await Promise.allSettled([service.bindMiniapp(1, 'member-one-code'), service.bindMiniapp(2, 'member-two-code')])
+    expect(results.map(result => result.status).sort()).toEqual(['fulfilled', 'rejected'])
+    expect((results.find(result => result.status === 'rejected') as PromiseRejectedResult).reason).toBeInstanceOf(ConflictException)
+    expect(identities).toHaveLength(1)
+    expect(root.transaction).toHaveBeenCalledWith('SERIALIZABLE', expect.any(Function))
+  })
+
+  it('rejects miniapp union-ID collision with another member OAuth identity', async () => {
+    await service.bindIdentity(1, identity)
+    await expect(service.bindMiniapp(2, 'collision-code')).rejects.toBeInstanceOf(ConflictException)
+    expect(identities).toHaveLength(1)
+    expect(members).toHaveLength(2)
+  })
+
+  it('allows an explicit miniapp bind for the same member sharing the OAuth union ID', async () => {
+    await service.bindIdentity(1, identity)
+    await service.bindMiniapp(1, 'same-member-code')
+    expect(identities).toHaveLength(2)
+    expect(identities.map(row => row.memberId)).toEqual([1, 1])
+  })
+
+  it('rejects miniapp login and binding for a disabled member', async () => {
+    await service.bindMiniapp(1, 'bind-code')
+    members[0].status = MemberStatus.Disable
+    await expect(service.loginMiniapp('login-code')).rejects.toBeInstanceOf(UnauthorizedException)
+    await expect(service.bindMiniapp(1, 'disabled-bind-code')).rejects.toBeInstanceOf(UnauthorizedException)
+    expect(issue).not.toHaveBeenCalled()
+  })
+
+  it.each(['', 'invalid code', 'a'.repeat(513)])('rejects malformed miniapp code without reserving it %p', async (code) => {
+    await expect(service.loginMiniapp(code)).rejects.toBeInstanceOf(BadRequestException)
+    expect(states.size).toBe(0)
+    expect(miniappGet).not.toHaveBeenCalled()
+  })
+
+  it('fails closed when replay storage is unavailable without exposing Redis details', async () => {
+    redis.set.mockRejectedValue(new Error('private Redis connection details'))
+    await expect(service.loginMiniapp('code')).rejects.toBeInstanceOf(ServiceUnavailableException)
+    await expect(service.loginMiniapp('code')).rejects.not.toThrow('private Redis')
+    expect(miniappGet).not.toHaveBeenCalled()
+  })
+
+  it('does not reserve or exchange code when miniapp is disabled', async () => {
+    const disabled = { ...config, miniapp: { ...config.miniapp, enabled: false } }
+    service = new MemberSocialService(disabled, redis as any, root as any, provider, { issue } as any, { consumeCode, sendCode } as any, miniapp)
+    await expect(service.loginMiniapp('code')).rejects.toBeInstanceOf(ServiceUnavailableException)
+    expect(redis.set).not.toHaveBeenCalled()
+    expect(miniappGet).not.toHaveBeenCalled()
+  })
+
+  it('rejects a mismatched provider tenant before binding or issuing tokens', async () => {
+    jest.spyOn(miniapp, 'exchangeCode').mockResolvedValue(identity)
+    await expect(service.bindMiniapp(1, 'bad-bind-code')).rejects.toBeInstanceOf(BadRequestException)
+    await expect(service.loginMiniapp('bad-login-code')).rejects.toBeInstanceOf(BadRequestException)
+    expect(identities).toHaveLength(0)
+    expect(issue).not.toHaveBeenCalled()
+  })
 
   it('creates unpredictable expiring state bound to the authenticated member and return URL', async () => {
     const first = await service.createOAuthState(1, 'bind', 'https://member.example/profile?tab=wechat')

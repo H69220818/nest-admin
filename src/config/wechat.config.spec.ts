@@ -1,7 +1,7 @@
 import { WechatConfig } from './wechat.config'
 
 describe('wechatConfig', () => {
-  const keys = ['WECHAT_OAUTH_ENABLED', 'WECHAT_OAUTH_MODE', 'WECHAT_OAUTH_APP_ID', 'WECHAT_OAUTH_APP_SECRET', 'WECHAT_OAUTH_CALLBACK_URL', 'WECHAT_OAUTH_SCOPE', 'WECHAT_OAUTH_RETURN_ORIGINS', 'WECHAT_OAUTH_STATE_TTL_SECONDS', 'WECHAT_OAUTH_HTTP_TIMEOUT_MS']
+  const keys = ['WECHAT_OAUTH_ENABLED', 'WECHAT_OAUTH_MODE', 'WECHAT_OAUTH_APP_ID', 'WECHAT_OAUTH_APP_SECRET', 'WECHAT_OAUTH_CALLBACK_URL', 'WECHAT_OAUTH_SCOPE', 'WECHAT_OAUTH_RETURN_ORIGINS', 'WECHAT_OAUTH_STATE_TTL_SECONDS', 'WECHAT_OAUTH_HTTP_TIMEOUT_MS', 'WECHAT_MINIAPP_ENABLED', 'WECHAT_MINIAPP_APP_ID', 'WECHAT_MINIAPP_APP_SECRET', 'WECHAT_MINIAPP_CODE_TTL_SECONDS', 'WECHAT_MINIAPP_HTTP_TIMEOUT_MS']
   let original: (string | undefined)[]
 
   beforeEach(() => {
@@ -32,6 +32,32 @@ describe('wechatConfig', () => {
 
   it('leaves OAuth disabled until explicitly configured', () => {
     expect(WechatConfig().enabled).toBe(false)
+  })
+
+  it('leaves miniapp independently disabled until explicitly configured', () => {
+    enable()
+    expect(WechatConfig()).toMatchObject({ miniapp: { enabled: false, codeTtlSeconds: 300, httpTimeoutMs: 5000 } })
+  })
+
+  it('configures miniapp independently from OAuth', () => {
+    Object.assign(process.env, { WECHAT_MINIAPP_ENABLED: 'true', WECHAT_MINIAPP_APP_ID: 'wx-mini', WECHAT_MINIAPP_APP_SECRET: 'mini-private-secret', WECHAT_MINIAPP_CODE_TTL_SECONDS: '600', WECHAT_MINIAPP_HTTP_TIMEOUT_MS: '1000' })
+    expect(WechatConfig()).toMatchObject({ enabled: false, miniapp: { enabled: true, appId: 'wx-mini', appSecret: 'mini-private-secret', codeTtlSeconds: 600, httpTimeoutMs: 1000 } })
+  })
+
+  it.each([
+    ['WECHAT_MINIAPP_APP_ID', ''],
+    ['WECHAT_MINIAPP_APP_ID', 'invalid app'],
+    ['WECHAT_MINIAPP_APP_SECRET', '  '],
+    ['WECHAT_MINIAPP_CODE_TTL_SECONDS', '299'],
+    ['WECHAT_MINIAPP_CODE_TTL_SECONDS', '601'],
+    ['WECHAT_MINIAPP_CODE_TTL_SECONDS', '300.5'],
+    ['WECHAT_MINIAPP_HTTP_TIMEOUT_MS', '0'],
+    ['WECHAT_MINIAPP_HTTP_TIMEOUT_MS', '5001'],
+    ['WECHAT_MINIAPP_HTTP_TIMEOUT_MS', '1.5'],
+  ])('rejects invalid miniapp config %s without exposing the secret', (key, value) => {
+    Object.assign(process.env, { WECHAT_MINIAPP_ENABLED: 'true', WECHAT_MINIAPP_APP_ID: 'wx-mini', WECHAT_MINIAPP_APP_SECRET: 'mini-private-secret', [key]: value })
+    expect(() => WechatConfig()).toThrow(key)
+    expect(() => WechatConfig()).not.toThrow('mini-private-secret')
   })
 
   it('preserves the exact configured app, scope and callback', () => {

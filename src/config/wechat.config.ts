@@ -14,6 +14,13 @@ export interface IWechatConfig {
   returnOrigins: string[]
   stateTtlSeconds: number
   httpTimeoutMs: number
+  miniapp: {
+    enabled: boolean
+    appId: string
+    appSecret: string
+    codeTtlSeconds: number
+    httpTimeoutMs: number
+  }
 }
 
 export const WechatConfig = registerAs(wechatRegToken, (): IWechatConfig => {
@@ -26,6 +33,13 @@ export const WechatConfig = registerAs(wechatRegToken, (): IWechatConfig => {
   const returnOrigins = env('WECHAT_OAUTH_RETURN_ORIGINS').split(',').map(value => value.trim()).filter(Boolean)
   const stateTtlSeconds = envNumber('WECHAT_OAUTH_STATE_TTL_SECONDS', 600)
   const httpTimeoutMs = envNumber('WECHAT_OAUTH_HTTP_TIMEOUT_MS', 5000)
+  const miniapp: IWechatConfig['miniapp'] = {
+    enabled: envBoolean('WECHAT_MINIAPP_ENABLED', false),
+    appId: env('WECHAT_MINIAPP_APP_ID'),
+    appSecret: env('WECHAT_MINIAPP_APP_SECRET'),
+    codeTtlSeconds: envNumber('WECHAT_MINIAPP_CODE_TTL_SECONDS', 300),
+    httpTimeoutMs: envNumber('WECHAT_MINIAPP_HTTP_TIMEOUT_MS', 5000),
+  }
 
   const invalid = (key: string): never => {
     throw new Error(`[wechat] Invalid or missing ${key}`)
@@ -34,6 +48,16 @@ export const WechatConfig = registerAs(wechatRegToken, (): IWechatConfig => {
     invalid('WECHAT_OAUTH_STATE_TTL_SECONDS')
   if (!Number.isInteger(httpTimeoutMs) || httpTimeoutMs < 1 || httpTimeoutMs > 5000)
     invalid('WECHAT_OAUTH_HTTP_TIMEOUT_MS')
+  if (!Number.isInteger(miniapp.codeTtlSeconds) || miniapp.codeTtlSeconds < 300 || miniapp.codeTtlSeconds > 600)
+    invalid('WECHAT_MINIAPP_CODE_TTL_SECONDS')
+  if (!Number.isInteger(miniapp.httpTimeoutMs) || miniapp.httpTimeoutMs < 1 || miniapp.httpTimeoutMs > 5000)
+    invalid('WECHAT_MINIAPP_HTTP_TIMEOUT_MS')
+  if (miniapp.enabled) {
+    if (!/^[\w-]{1,128}$/.test(miniapp.appId))
+      invalid('WECHAT_MINIAPP_APP_ID')
+    if (!miniapp.appSecret.trim())
+      invalid('WECHAT_MINIAPP_APP_SECRET')
+  }
   if (enabled) {
     if (!['website', 'official_account'].includes(mode))
       invalid('WECHAT_OAUTH_MODE')
@@ -64,5 +88,5 @@ export const WechatConfig = registerAs(wechatRegToken, (): IWechatConfig => {
       }
     }
   }
-  return { enabled, mode, appId, appSecret, callbackUrl, scope, returnOrigins, stateTtlSeconds, httpTimeoutMs }
+  return { enabled, mode, appId, appSecret, callbackUrl, scope, returnOrigins, stateTtlSeconds, httpTimeoutMs, miniapp }
 })

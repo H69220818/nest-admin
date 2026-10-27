@@ -13,6 +13,7 @@ describe('member OAuth callback logging', () => {
   let debug: jest.SpyInstance
   let warn: jest.SpyInstance
   const consumeOAuthCallback = jest.fn()
+  const loginMiniapp = jest.fn()
   const rejectionListeners = process.listeners('unhandledRejection')
   const exceptionListeners = process.listeners('uncaughtException')
   const state = 'a'.repeat(64)
@@ -21,7 +22,7 @@ describe('member OAuth callback logging', () => {
   beforeAll(async () => {
     const module = await Test.createTestingModule({
       controllers: [MemberSocialController],
-      providers: [{ provide: MemberSocialService, useValue: { consumeOAuthCallback } }],
+      providers: [{ provide: MemberSocialService, useValue: { consumeOAuthCallback, loginMiniapp } }],
     }).compile()
     app = module.createNestApplication<NestFastifyApplication>(new FastifyAdapter())
     app.useGlobalInterceptors(new LoggingInterceptor())
@@ -40,6 +41,7 @@ describe('member OAuth callback logging', () => {
 
   beforeEach(() => {
     consumeOAuthCallback.mockReset()
+    loginMiniapp.mockReset()
     debug = jest.spyOn(Logger.prototype, 'debug').mockImplementation(() => undefined)
     warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined)
   })
@@ -108,5 +110,29 @@ describe('member OAuth callback logging', () => {
       expect(output).toContain('code=[REDACTED]&state=[REDACTED]')
       expect(output).toContain(safeQuery)
     }
+  })
+
+  it('never logs miniapp POST bodies and redacts code in the request URL', async () => {
+    loginMiniapp.mockResolvedValueOnce({ accessToken: 'member-access', refreshToken: 'member-refresh' })
+    const response = await app.inject({ method: 'POST', url: '/member/auth/wechat-miniapp?code=query-secret-code', payload: { code: 'body-secret-code', session_key: 'private-session-key' } })
+    expect(response.statusCode).toBe(201)
+    expect(loginMiniapp).toHaveBeenCalledWith('body-secret-code')
+    expect(debug).toHaveBeenCalledTimes(2)
+    expect(warn).not.toHaveBeenCalled()
+    const output = JSON.stringify(debug.mock.calls)
+    expect(output).toContain('code=[REDACTED]')
+    expect(output).not.toMatch(/query-secret-code|body-secret-code|session_key|private-session-key|member-access|member-refresh/)
+  })
+
+  it.each(['validation', 'service'])('does not log miniapp code when %s rejects the request', async (failure) => {
+    loginMiniapp.mockRejectedValueOnce(new BadRequestException('微信小程序授权码无效或已使用'))
+    const code = failure === 'validation' ? 'invalid secret body code' : 'secret-body-code'
+    const response = await app.inject({ method: 'POST', url: '/member/auth/wechat-miniapp?code=secret-query-code', payload: { code } })
+    expect(response.statusCode).toBe(failure === 'validation' ? 422 : 400)
+    expect(debug).toHaveBeenCalledTimes(1)
+    expect(warn).toHaveBeenCalledTimes(1)
+    const output = JSON.stringify([...debug.mock.calls, ...warn.mock.calls])
+    expect(output).toContain('code=[REDACTED]')
+    expect(output).not.toMatch(/secret-query-code|secret-body-code|invalid secret body code/)
   })
 })

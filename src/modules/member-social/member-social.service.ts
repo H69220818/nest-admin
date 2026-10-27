@@ -14,6 +14,7 @@ import { MemberEntity } from '~/modules/member/member.entity'
 
 import { MemberIdentityEntity } from './member-identity.entity'
 import { NormalizedSocialIdentity } from './providers/member-social-provider'
+import { WechatMiniappProvider } from './providers/wechat-miniapp.provider'
 import { WechatOAuthProvider } from './providers/wechat-oauth.provider'
 
 export interface MemberBinding {
@@ -48,7 +49,16 @@ export class MemberSocialService {
     private readonly oauth: WechatOAuthProvider,
     private readonly tokens: MemberTokenService,
     private readonly sms: SmsCodeService,
+    private readonly miniapp: WechatMiniappProvider,
   ) {}
+
+  async bindMiniapp(memberId: number, code: string): Promise<MemberBinding> {
+    return this.bindIdentity(memberId, await this.exchangeMiniappCode(code))
+  }
+
+  async loginMiniapp(code: string): Promise<MemberTokenPair> {
+    return this.loginByIdentity(await this.exchangeMiniappCode(code))
+  }
 
   async createOAuthState(memberId: number | undefined, intent: 'login' | 'bind', returnUrl: string): Promise<{ authorizationUrl: string, expiresIn: number }> {
     this.validateReturnUrl(returnUrl)
@@ -229,6 +239,29 @@ export class MemberSocialService {
 
   private stateKey(state: string): string {
     return `member:social:oauth:state:${createHash('sha256').update(state).digest('hex')}`
+  }
+
+  private async exchangeMiniappCode(code: string): Promise<NormalizedSocialIdentity> {
+    const config = this.config.miniapp
+    if (!config.enabled)
+      throw new ServiceUnavailableException('微信小程序登录尚未配置')
+    if (typeof code !== 'string' || !/^[\w-]{1,512}$/.test(code))
+      throw new BadRequestException('微信小程序授权码无效')
+    const key = `member:social:miniapp:code:${config.appId}:${createHash('sha256').update(code).digest('hex')}`
+    let reserved: string | null
+    try {
+      reserved = await this.redis.set(key, '1', 'EX', config.codeTtlSeconds, 'NX')
+    }
+    catch {
+      throw new ServiceUnavailableException('微信小程序授权服务暂不可用')
+    }
+    if (reserved !== 'OK')
+      throw new BadRequestException('微信小程序授权码无效或已使用')
+    // Never release this reservation: WeChat may have consumed the code even on timeout.
+    const identity = await this.miniapp.exchangeCode(code)
+    if (identity.provider !== MemberIdentityProvider.WechatMiniapp || identity.tenant !== config.appId)
+      throw new BadRequestException('微信小程序授权身份无效')
+    return identity
   }
 
   private safeBinding(row: MemberIdentityEntity): MemberBinding {
