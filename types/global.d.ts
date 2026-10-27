@@ -1,4 +1,15 @@
 declare global {
+  interface IMemberAuthUser {
+    sub: string
+    aud: 'member'
+    tokenType: 'access'
+    sessionId: string
+    /** Random per-issuance version; the persisted session hash is authoritative. */
+    pv: number
+    exp?: number
+    iat?: number
+  }
+
   interface IAuthUser {
     uid: number
     pv: number
