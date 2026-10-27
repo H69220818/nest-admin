@@ -13,6 +13,7 @@ import { BusinessException } from '~/common/exceptions/biz.exception'
 import { ErrorEnum } from '~/constants/error-code.constant'
 
 import { isDev } from '~/global/env'
+import { redactRequestUrl } from '~/utils/request-log.util'
 
 interface myError {
   readonly status: number
@@ -34,7 +35,7 @@ export class AllExceptionsFilter implements ExceptionFilter {
     const request = ctx.getRequest<FastifyRequest>()
     const response = ctx.getResponse<FastifyReply>()
 
-    const url = request.raw.url!
+    const url = redactRequestUrl(request.raw.url!)
 
     const status = this.getStatus(exception)
     let message = this.getErrorMessage(exception)
@@ -52,7 +53,7 @@ export class AllExceptionsFilter implements ExceptionFilter {
     }
     else {
       this.logger.warn(
-        `错误信息：(${status}) ${message} Path: ${decodeURI(url)}`,
+        `错误信息：(${status}) ${message} Path: ${url}`,
       )
     }
 

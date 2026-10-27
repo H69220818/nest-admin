@@ -7,6 +7,8 @@ import {
 } from '@nestjs/common'
 import { Observable, tap } from 'rxjs'
 
+import { redactRequestUrl } from '~/utils/request-log.util'
+
 @Injectable()
 export class LoggingInterceptor implements NestInterceptor {
   private logger = new Logger(LoggingInterceptor.name, { timestamp: false })
@@ -17,7 +19,7 @@ export class LoggingInterceptor implements NestInterceptor {
   ): Observable<any> {
     const call$ = next.handle()
     const request = context.switchToHttp().getRequest()
-    const content = `${request.method} -> ${request.url}`
+    const content = `${request.method} -> ${redactRequestUrl(request.url)}`
     const isSse = request.headers.accept === 'text/event-stream'
     this.logger.debug(`+++ 请求：${content}`)
     const now = Date.now()
