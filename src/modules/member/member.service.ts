@@ -4,10 +4,16 @@ import { BadRequestException, ConflictException, Injectable, NotFoundException }
 import { InjectRepository } from '@nestjs/typeorm'
 import { EntityManager, QueryFailedError, Repository } from 'typeorm'
 
+import { PagerDto } from '~/common/dto/pager.dto'
+import { paginate } from '~/helper/paginate'
+import { Pagination } from '~/helper/paginate/pagination'
+
 import { MemberProfileUpdateDto } from './dto/member.dto'
 import { MemberStatus } from './member.constant'
 import { MemberEntity } from './member.entity'
-import { CreateRegisteredMemberInput } from './member.model'
+import { CreateRegisteredMemberInput, MemberInfo } from './member.model'
+
+const memberInfoFields = ['id', 'createdAt', 'updatedAt', 'parentId', 'inviteCode', 'phone', 'email', 'nickname', 'avatar', 'status'] as const
 
 /** Canonical E.164 identity; unprefixed mainland mobile numbers default to +86. */
 export function normalizeMemberPhone(phone: string): string {
@@ -32,6 +38,27 @@ export class MemberService {
     @InjectRepository(MemberEntity)
     private readonly memberRepository: Repository<MemberEntity>,
   ) {}
+
+  async info(id: number): Promise<MemberInfo> {
+    const member = await this.memberRepository.findOne({ where: { id }, select: [...memberInfoFields] })
+    if (!member)
+      throw new NotFoundException('会员不存在')
+
+    return this.toInfo(member)
+  }
+
+  async list({ page, pageSize }: PagerDto): Promise<Pagination<MemberInfo>> {
+    const query = this.memberRepository.createQueryBuilder('member')
+      .select(memberInfoFields.map(field => `member.${field}`))
+      .orderBy('member.id', 'DESC')
+    const result = await paginate(query, { page, pageSize })
+    return new Pagination(result.items.map(member => this.toInfo(member)), result.meta)
+  }
+
+  private toInfo(member: MemberEntity): MemberInfo {
+    const { id, createdAt, updatedAt, parentId, inviteCode, phone, email, nickname, avatar, status } = member
+    return { id, createdAt, updatedAt, parentId, inviteCode, phone, email, nickname, avatar, status }
+  }
 
   findEnabledById(id: number): Promise<MemberEntity | null> {
     return this.memberRepository.findOneBy({ id, status: MemberStatus.Enabled })

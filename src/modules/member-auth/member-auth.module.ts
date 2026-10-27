@@ -1,4 +1,4 @@
-import { Module, ServiceUnavailableException } from '@nestjs/common'
+import { forwardRef, Module, ServiceUnavailableException } from '@nestjs/common'
 import { ConfigModule } from '@nestjs/config'
 import { JwtModule } from '@nestjs/jwt'
 import { PassportModule } from '@nestjs/passport'
@@ -21,7 +21,7 @@ import { SmsCodeService } from './services/sms-code.service'
   imports: [
     ConfigModule.forFeature(MemberAuthConfig),
     TypeOrmModule.forFeature([MemberAccessTokenEntity, MemberRefreshTokenEntity]),
-    MemberModule,
+    forwardRef(() => MemberModule),
     PassportModule,
     // MemberTokenService supplies its isolated secrets for every sign/verify call.
     JwtModule.register({}),

@@ -1,9 +1,12 @@
-import { BadRequestException, ConflictException, NotFoundException } from '@nestjs/common'
+import { BadRequestException, ConflictException, Module, NotFoundException } from '@nestjs/common'
 import { Test } from '@nestjs/testing'
 import { getRepositoryToken } from '@nestjs/typeorm'
 import { plainToInstance } from 'class-transformer'
 import { validate } from 'class-validator'
 import { EntityManager, QueryFailedError, Repository } from 'typeorm'
+
+import { MemberAuthModule } from '~/modules/member-auth/member-auth.module'
+import { MemberTokenService } from '~/modules/member-auth/services/member-token.service'
 
 import { MemberProfileUpdateDto, MemberStatusUpdateDto } from './dto/member.dto'
 import { MemberStatus } from './member.constant'
@@ -188,7 +191,12 @@ describe('member service boundary', () => {
   })
 
   it('exports an injectable member service from the member module', async () => {
+    @Module({ providers: [{ provide: MemberTokenService, useValue: {} }], exports: [MemberTokenService] })
+    class TestMemberAuthModule {}
+
     const module = await Test.createTestingModule({ imports: [MemberModule] })
+      .overrideModule(MemberAuthModule)
+      .useModule(TestMemberAuthModule)
       .overrideProvider(getRepositoryToken(MemberEntity))
       .useValue(repository)
       .compile()
