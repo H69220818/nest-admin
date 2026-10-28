@@ -4,10 +4,11 @@ import { APP_GUARD } from '@nestjs/core'
 import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify'
 import { Test } from '@nestjs/testing'
 import { getRepositoryToken } from '@nestjs/typeorm'
-import { Repository } from 'typeorm'
+import { EntityManager, Repository } from 'typeorm'
 
 import { PERMISSION_KEY } from '~/modules/auth/auth.constant'
 import { AUTH_ROUTE_KEY } from '~/modules/member-auth/decorators/member-auth.decorator'
+import { MemberAccessTokenEntity } from '~/modules/member-auth/entities/member-access-token.entity'
 import { MemberAuthModule } from '~/modules/member-auth/member-auth.module'
 import { MemberTokenService } from '~/modules/member-auth/services/member-token.service'
 
@@ -32,9 +33,8 @@ describe('member profile and admin management', () => {
   let service: MemberService
   let rows: MemberEntity[]
   let sessions: number[]
-  let repository: { findOne: jest.Mock, update: jest.Mock, createQueryBuilder: jest.Mock }
+  let repository: { findOne: jest.Mock, update: jest.Mock, createQueryBuilder: jest.Mock, manager: EntityManager }
   let query: { select: jest.Mock, orderBy: jest.Mock, take: jest.Mock, skip: jest.Mock, getManyAndCount: jest.Mock }
-  let tokens: { revokeAll: jest.Mock }
 
   beforeEach(async () => {
     rows = [42, 99].map(id => Object.assign(new MemberEntity(), {
@@ -79,19 +79,24 @@ describe('member profile and admin management', () => {
         return { affected: row ? 1 : 0 }
       }),
       createQueryBuilder: jest.fn(() => query),
-    }
-    tokens = {
-      revokeAll: jest.fn(async (id) => {
-        expect(rows.find(member => member.id === id)?.status).not.toBe(MemberStatus.Enabled)
-        sessions = sessions.filter(memberId => memberId !== id)
-      }),
+      manager: {
+        transaction: async callback => callback(repository.manager),
+        findOne: async (_target, options) => repository.findOne(options),
+        find: async (_target, { where }) => sessions.filter(memberId => memberId === where.memberId).map(memberId => ({ id: String(memberId), memberId })),
+        update: async (target, where, values) => {
+          if (target === MemberEntity)
+            return repository.update(where.id, values)
+          if (target === MemberAccessTokenEntity)
+            sessions = sessions.filter(memberId => memberId !== Number(where.id))
+          return { affected: 1 }
+        },
+      } as unknown as EntityManager,
     }
     service = new MemberService(repository as unknown as Repository<MemberEntity>)
     const module = await Test.createTestingModule({
       controllers: [MemberProfileController, MemberController],
       providers: [
         { provide: MemberService, useValue: service },
-        { provide: MemberTokenService, useValue: tokens },
         { provide: APP_GUARD, useClass: MemberRequestGuard },
       ],
     }).compile()
@@ -178,10 +183,10 @@ describe('member profile and admin management', () => {
   it('returns 404 for missing member reads and status updates without revoking sessions', async () => {
     expect((await app.inject({ method: 'GET', url: '/members/999' })).statusCode).toBe(404)
     expect((await app.inject({ method: 'PUT', url: '/members/999/status', payload: { status: MemberStatus.Disable } })).statusCode).toBe(404)
-    expect(tokens.revokeAll).not.toHaveBeenCalled()
+    expect(sessions).toEqual([42, 42, 99])
   })
 
-  it('revokes all sessions after disabling while preserving the invitation chain and other member sessions', async () => {
+  it('revokes all sessions when disabling while preserving the invitation chain and other member sessions', async () => {
     const response = await app.inject({ method: 'PUT', url: '/members/42/status', payload: { status: MemberStatus.Disable } })
     expect(response.statusCode).toBe(200)
     expect(rows[0]).toMatchObject({ status: MemberStatus.Disable, parentId: 7, inviteCode: 'abcdef0123456789' })
@@ -197,7 +202,7 @@ describe('member profile and admin management', () => {
   it('does not revoke sessions when enabling a member', async () => {
     const response = await app.inject({ method: 'PUT', url: '/members/42/status', payload: { status: MemberStatus.Enabled } })
     expect(response.statusCode).toBe(200)
-    expect(tokens.revokeAll).not.toHaveBeenCalled()
+    expect(sessions).toEqual([42, 42, 99])
   })
 
   it('rejects invalid admin status with production validation', async () => {
@@ -219,11 +224,11 @@ describe('member profile and admin management', () => {
   it('does not revoke sessions after a failed database update', async () => {
     repository.update.mockRejectedValueOnce(new NotFoundException())
     expect((await app.inject({ method: 'PUT', url: '/members/42/status', payload: { status: MemberStatus.Disable } })).statusCode).toBe(404)
-    expect(tokens.revokeAll).not.toHaveBeenCalled()
+    expect(sessions).toEqual([42, 42, 99])
   })
 
   it('registers both controllers through MemberModule with its exported auth dependency', async () => {
-    @Module({ providers: [{ provide: MemberTokenService, useValue: tokens }], exports: [MemberTokenService] })
+    @Module({ providers: [{ provide: MemberTokenService, useValue: {} }], exports: [MemberTokenService] })
     class TestMemberAuthModule {}
 
     const module = await Test.createTestingModule({ imports: [MemberModule] })

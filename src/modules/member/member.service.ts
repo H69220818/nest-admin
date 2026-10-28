@@ -7,6 +7,7 @@ import { EntityManager, QueryFailedError, Repository } from 'typeorm'
 import { PagerDto } from '~/common/dto/pager.dto'
 import { paginate } from '~/helper/paginate'
 import { Pagination } from '~/helper/paginate/pagination'
+import { revokeLockedMemberSessions } from '~/modules/member-auth/services/member-session-revocation'
 
 import { MemberProfileUpdateDto } from './dto/member.dto'
 import { MemberStatus } from './member.constant'
@@ -130,8 +131,18 @@ export class MemberService {
     if (![MemberStatus.Disable, MemberStatus.Enabled, MemberStatus.Cancelled].includes(status))
       throw new BadRequestException('会员状态无效')
 
-    const result = await this.memberRepository.update(memberId, { status })
-    if (result.affected === 0)
-      throw new NotFoundException('会员不存在')
+    await this.memberRepository.manager.transaction(async (manager) => {
+      // Same member -> session -> refresh lock order as issuance and rotation.
+      const member = await manager.findOne(MemberEntity, {
+        where: { id: memberId },
+        lock: { mode: 'pessimistic_write' },
+      })
+      if (!member)
+        throw new NotFoundException('会员不存在')
+
+      await manager.update(MemberEntity, { id: memberId }, { status })
+      if (status !== MemberStatus.Enabled)
+        await revokeLockedMemberSessions(manager, memberId)
+    })
   }
 }

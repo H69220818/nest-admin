@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import path from 'node:path'
 
 import { HttpService } from '@nestjs/axios'
-import { Global, HttpStatus, Module, UnprocessableEntityException, ValidationPipe } from '@nestjs/common'
+import { Global, HttpStatus, Logger, Module, UnprocessableEntityException, ValidationPipe } from '@nestjs/common'
 import { APP_GUARD } from '@nestjs/core'
 import { JwtService } from '@nestjs/jwt'
 import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify'
@@ -29,7 +29,7 @@ import { MemberAccessTokenEntity } from '~/modules/member-auth/entities/member-a
 import { MemberRefreshTokenEntity } from '~/modules/member-auth/entities/member-refresh-token.entity'
 import { SMS_SENDER, SmsPurpose, SmsSender } from '~/modules/member-auth/member-auth.constant'
 import { MemberAuthModule } from '~/modules/member-auth/member-auth.module'
-import { MemberTokenPair } from '~/modules/member-auth/services/member-token.service'
+import { MemberTokenPair, MemberTokenService } from '~/modules/member-auth/services/member-token.service'
 import { MemberIdentityEntity } from '~/modules/member-social/member-identity.entity'
 import { MemberSocialModule } from '~/modules/member-social/member-social.module'
 import { MenuEntity } from '~/modules/system/menu/menu.entity'
@@ -42,6 +42,7 @@ import { UserService } from '~/modules/user/user.service'
 import { MemberTeamService } from './member-team.service'
 import { MemberStatus } from './member.constant'
 import { MemberEntity } from './member.entity'
+import { MemberService } from './member.service'
 
 @Global()
 @Module({})
@@ -256,6 +257,101 @@ integration('member acceptance with disposable MySQL 8 schema and Redis keys', (
     }
   }, 30000)
 
+  function barrier() {
+    let release!: () => void
+    const promise = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    return { promise, release }
+  }
+
+  let raceMember = 0
+  async function createRaceMember() {
+    const members = app.get(MemberService)
+    const member = await database.transaction(manager => members.createRegisteredMember({
+      phone: `+861800000${String(++raceMember).padStart(4, '0')}`,
+      phoneVerifiedAt: new Date(),
+    }, manager))
+    const jwt = new JwtService()
+    return { member, jwt, tokens: new MemberTokenService(jwt, memberConfig, database.manager, members) }
+  }
+
+  it.each([
+    ['issue', MemberStatus.Disable],
+    ['issue', MemberStatus.Cancelled],
+    ['rotate', MemberStatus.Disable],
+    ['rotate', MemberStatus.Cancelled],
+  ] as const)('serializes a paused %s with status %s so re-enabling never revives credentials', async (operation, status) => {
+    const { member, jwt, tokens } = await createRaceMember()
+    const existing = await tokens.issue(member.id)
+    const otherDevice = await tokens.issue(member.id)
+    const paused = barrier()
+    const resume = barrier()
+    const sign = jwt.signAsync.bind(jwt)
+    const signing = jest.spyOn(jwt, 'signAsync').mockImplementation(async (...args) => {
+      const value = await sign(...args)
+      paused.release()
+      await resume.promise
+      return value
+    })
+    const pending = operation === 'issue' ? tokens.issue(member.id) : tokens.rotate(existing.refreshToken)
+    await paused.promise
+    const transition = { completed: false }
+    const disabling = Promise.resolve(app.inject({ method: 'PUT', url: `/members/${member.id}/status`, headers: bearer(adminToken), payload: { status } }))
+      .then((response) => {
+        transition.completed = true
+        return response
+      })
+    try {
+      // Release only after disable commits (the bug) or MySQL reports that it is
+      // waiting on the member lock. No timing assumption determines the outcome.
+      const deadline = Date.now() + 5000
+      while (!transition.completed) {
+        const [waiting] = await server.query(`SELECT COUNT(*) AS count
+          FROM performance_schema.data_lock_waits w
+          JOIN performance_schema.data_locks l ON l.ENGINE_LOCK_ID = w.REQUESTING_ENGINE_LOCK_ID
+          WHERE l.OBJECT_SCHEMA = ? AND l.OBJECT_NAME = 'member'`, [schema])
+        if ((waiting as { count: number }[])[0].count > 0)
+          break
+        if (Date.now() >= deadline)
+          throw new Error('Status transition neither completed nor waited on the member lock')
+        await new Promise<void>(resolve => setImmediate(resolve))
+      }
+    }
+    finally {
+      resume.release()
+      await Promise.allSettled([pending, disabling])
+      signing.mockRestore()
+    }
+    const issued = await pending
+    expect((await disabling).statusCode).toBe(200)
+    expect((await app.inject({ method: 'PUT', url: `/members/${member.id}/status`, headers: bearer(adminToken), payload: { status: MemberStatus.Enabled } })).statusCode).toBe(200)
+    for (const pair of [existing, otherDevice, issued]) {
+      await expect(tokens.verifyAccess(pair.accessToken)).rejects.toMatchObject({ status: 401 })
+      await expect(tokens.rotate(pair.refreshToken)).rejects.toMatchObject({ status: 401 })
+    }
+    expect((await database.getRepository(MemberAccessTokenEntity).findBy({ memberId: member.id })).every(session => session.revokedAt instanceof Date)).toBe(true)
+  }, 15000)
+
+  it.each([MemberStatus.Disable, MemberStatus.Cancelled])('rolls back status %s and session changes when refresh revocation fails', async (status) => {
+    const { member, tokens } = await createRaceMember()
+    const pair = await tokens.issue(member.id)
+    await database.query(`CREATE TRIGGER fail_member_refresh_revoke BEFORE UPDATE ON member_refresh_token
+      FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Injected refresh revocation failure'`)
+    const errorLog = jest.spyOn(Logger.prototype, 'error').mockImplementation(() => {})
+    try {
+      expect((await app.inject({ method: 'PUT', url: `/members/${member.id}/status`, headers: bearer(adminToken), payload: { status } })).statusCode).toBe(500)
+      expect((await database.getRepository(MemberEntity).findOneByOrFail({ id: member.id })).status).toBe(MemberStatus.Enabled)
+      await expect(tokens.verifyAccess(pair.accessToken)).resolves.toMatchObject({ sub: String(member.id) })
+      expect((await database.getRepository(MemberAccessTokenEntity).findOneByOrFail({ memberId: member.id })).revokedAt).toBeNull()
+    }
+    finally {
+      errorLog.mockRestore()
+      await database.query('DROP TRIGGER fail_member_refresh_revoke')
+    }
+    await expect(tokens.rotate(pair.refreshToken)).resolves.toHaveProperty('accessToken')
+  })
+
   async function sms(phone: string, purpose: SmsPurpose): Promise<string> {
     const response = await app.inject({ method: 'POST', url: `/member/auth/sms/${purpose}`, payload: { phone }, headers: { 'x-device-id': `acceptance-${phone}` } })
     expect(response.statusCode).toBe(201)
@@ -282,6 +378,7 @@ integration('member acceptance with disposable MySQL 8 schema and Redis keys', (
   }
 
   it('registers A → B → C, authenticates all B channels, blocks replay/audience mixing and revokes every B session without changing ancestry', async () => {
+    const existingMemberCount = await database.getRepository(MemberEntity).count()
     const a = await register('+8613800000011')
     const aProfile = (await app.inject({ url: '/member/profile', headers: bearer(a.accessToken) })).json()
     expect(aProfile.parentId).toBeNull()
@@ -330,7 +427,7 @@ integration('member acceptance with disposable MySQL 8 schema and Redis keys', (
     expect((await app.inject({ method: 'POST', url: '/member/auth/wechat-miniapp', payload: { code: 'mini-login-b' } })).statusCode).toBe(400)
     expect(miniLogin.body).not.toMatch(/external-session-key|openid|unionid/)
     expect((await app.inject({ method: 'POST', url: '/member/auth/wechat-miniapp', payload: { code: 'mini-unknown' } })).statusCode).toBe(401)
-    expect(await database.getRepository(MemberEntity).count()).toBe(3)
+    expect(await database.getRepository(MemberEntity).count()).toBe(existingMemberCount + 3)
 
     const bPairs = [b, phonePair, oauthPair, miniPair]
     for (const pair of bPairs) {

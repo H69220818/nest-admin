@@ -133,6 +133,7 @@ describe('memberTokenService', () => {
     expect(JSON.stringify([...store.access, ...store.refresh])).not.toContain(pair.refreshToken)
     expect(store.refresh[0].expiresAt.getTime() - store.refresh[0].createdAt.getTime()).toBe(2592000000)
     await expect(service.verifyAccess(pair.accessToken)).resolves.toMatchObject({ sub: '7', aud: 'member', sessionId: store.access[0].id })
+    expect(store.locks[0]).toMatchObject({ target: MemberEntity, options: { where: { id: 7 }, lock: { mode: 'pessimistic_write' } } })
   })
 
   it('permits two simultaneous sessions for one member', async () => {
@@ -207,6 +208,7 @@ describe('memberTokenService', () => {
   it('rotates immediately with distinct access values, retaining consumed generations in the same session', async () => {
     const first = await service.issue(7)
     const sessionId = store.access[0].id
+    store.locks = []
     const second = await service.rotate(first.refreshToken)
     const third = await service.rotate(second.refreshToken)
     expect(new Set([first.accessToken, second.accessToken, third.accessToken]).size).toBe(3)
@@ -218,8 +220,9 @@ describe('memberTokenService', () => {
     await expect(service.verifyAccess(first.accessToken)).rejects.toBeInstanceOf(UnauthorizedException)
     await expect(service.verifyAccess(second.accessToken)).rejects.toBeInstanceOf(UnauthorizedException)
     await expect(service.verifyAccess(third.accessToken)).resolves.toMatchObject({ sessionId })
-    expect(store.locks[0]).toMatchObject({ target: MemberAccessTokenEntity, options: { where: { id: sessionId }, lock: { mode: 'pessimistic_write' } } })
-    expect(store.locks[1]).toMatchObject({ target: MemberRefreshTokenEntity, options: { lock: { mode: 'pessimistic_write' } } })
+    expect(store.locks[0]).toMatchObject({ target: MemberEntity, options: { where: { id: 7 }, lock: { mode: 'pessimistic_write' } } })
+    expect(store.locks[1]).toMatchObject({ target: MemberAccessTokenEntity, options: { where: { id: sessionId }, lock: { mode: 'pessimistic_write' } } })
+    expect(store.locks[2]).toMatchObject({ target: MemberRefreshTokenEntity, options: { lock: { mode: 'pessimistic_write' } } })
   })
 
   it('refreshes an expired access token when refresh remains valid', async () => {

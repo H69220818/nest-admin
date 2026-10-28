@@ -159,7 +159,7 @@ describe('purpose-bound member SMS codes', () => {
     expect(sender.sendCode).toHaveBeenCalledTimes(1)
   })
 
-  it('limits each phone to five sends per rolling day even when IP and purpose change', async () => {
+  it('limits each phone to five sends per fixed 24-hour window even when IP and purpose change', async () => {
     for (let attempt = 0; attempt < 5; attempt++) {
       await service.sendCode(phone, attempt % 2 ? 'login' : 'register', { ip: `192.0.2.${attempt}` })
       jest.advanceTimersByTime(60_001)
@@ -170,7 +170,7 @@ describe('purpose-bound member SMS codes', () => {
     await expect(service.sendCode(phone, 'register', meta)).resolves.toEqual({ success: true })
   })
 
-  it('limits one IP to twenty sends per rolling day across different phones', async () => {
+  it('limits one IP to twenty sends per fixed 24-hour window across different phones', async () => {
     for (let index = 0; index < 20; index++)
       await service.sendCode(`+1415555${String(index).padStart(4, '0')}`, 'register', { ip: meta.ip })
     await expect(service.sendCode('+14155559999', 'register', { ip: meta.ip })).rejects.toBeDefined()

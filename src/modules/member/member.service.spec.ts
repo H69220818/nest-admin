@@ -17,17 +17,21 @@ import { MemberService, normalizeMemberPhone } from './member.service'
 describe('member service boundary', () => {
   const verifiedAt = new Date('2026-10-27T01:00:00.000Z')
   let service: MemberService
-  let repository: { findOneBy: jest.Mock, update: jest.Mock }
-  let manager: { create: jest.Mock, save: jest.Mock }
+  let repository: { findOneBy: jest.Mock, update: jest.Mock, manager: { transaction: jest.Mock } }
+  let manager: { create: jest.Mock, save: jest.Mock, findOne: jest.Mock, find: jest.Mock, update: jest.Mock }
 
   beforeEach(() => {
     repository = {
       findOneBy: jest.fn().mockResolvedValue(null),
       update: jest.fn().mockResolvedValue({ affected: 1 }),
+      manager: { transaction: jest.fn(async callback => callback(manager)) },
     }
     manager = {
       create: jest.fn((_target, input) => Object.assign(new MemberEntity(), input)),
       save: jest.fn(async member => Object.assign(member, { id: 42 })),
+      findOne: jest.fn().mockResolvedValue({ id: 42, status: MemberStatus.Enabled }),
+      find: jest.fn().mockResolvedValue([]),
+      update: jest.fn().mockResolvedValue({ affected: 1 }),
     }
     service = new MemberService(repository as unknown as Repository<MemberEntity>)
   })
@@ -177,16 +181,17 @@ describe('member service boundary', () => {
 
   it.each([MemberStatus.Disable, MemberStatus.Enabled, MemberStatus.Cancelled])('updates status %s without changing identity or relationships', async (status) => {
     await service.updateStatus(42, status)
-    expect(repository.update).toHaveBeenCalledWith(42, { status })
+    expect(manager.update).toHaveBeenCalledWith(MemberEntity, { id: 42 }, { status })
   })
 
   it.each([-1, 3, 'Enabled', null, undefined, { status: 1, parentId: 999 }])('rejects invalid status %p at the service boundary', async (status) => {
     await expect(service.updateStatus(42, status as any)).rejects.toBeInstanceOf(BadRequestException)
     expect(repository.update).not.toHaveBeenCalled()
+    expect(manager.update).not.toHaveBeenCalled()
   })
 
   it('reports a missing member for a status update', async () => {
-    repository.update.mockResolvedValue({ affected: 0 })
+    manager.findOne.mockResolvedValue(null)
     await expect(service.updateStatus(42, MemberStatus.Disable)).rejects.toBeInstanceOf(NotFoundException)
   })
 

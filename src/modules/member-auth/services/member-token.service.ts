@@ -12,6 +12,8 @@ import { MemberService } from '~/modules/member/member.service'
 import { MemberAccessTokenEntity } from '../entities/member-access-token.entity'
 import { MemberRefreshTokenEntity } from '../entities/member-refresh-token.entity'
 
+import { revokeLockedMemberSessions, revokeLockedSession } from './member-session-revocation'
+
 export interface MemberTokenPair {
   accessToken: string
   refreshToken: string
@@ -27,10 +29,16 @@ export class MemberTokenService {
   ) {}
 
   async issue(memberId: number): Promise<MemberTokenPair> {
-    if (!await this.memberService.findEnabledById(memberId))
-      throw new UnauthorizedException()
-
     return this.entityManager.transaction(async (manager) => {
+      // All credential mutations lock member -> session -> refresh rows.
+      // Keep this lock through insertion so disable cannot miss a pending login.
+      const member = await manager.findOne(MemberEntity, {
+        where: { id: memberId },
+        lock: { mode: 'pessimistic_write' },
+      })
+      if (!member || member.status !== MemberStatus.Enabled)
+        throw new UnauthorizedException()
+
       const session = manager.create(MemberAccessTokenEntity, {
         id: randomUUID(),
         memberId,
@@ -46,15 +54,24 @@ export class MemberTokenService {
       throw new UnauthorizedException()
 
     const tokenHash = this.refreshHash(refreshToken)
-    // This lookup only locates the immutable session ID. Status is re-read under locks.
+    // These lookups only locate immutable ownership. Status is re-read under locks.
     const candidate = await this.entityManager.findOneBy(MemberRefreshTokenEntity, { tokenHash })
     if (!candidate)
       throw new UnauthorizedException()
+    const owner = await this.entityManager.findOneBy(MemberAccessTokenEntity, { id: candidate.accessTokenId })
+    if (!owner)
+      throw new UnauthorizedException()
 
     const pair = await this.entityManager.transaction(async (manager) => {
-      // Every mutation locks the session first, so rotation and logout serialize.
+      const member = await manager.findOne(MemberEntity, {
+        where: { id: owner.memberId },
+        lock: { mode: 'pessimistic_write' },
+      })
+      if (!member)
+        return null
+
       const session = await manager.findOne(MemberAccessTokenEntity, {
-        where: { id: candidate.accessTokenId },
+        where: { id: candidate.accessTokenId, memberId: member.id },
         lock: { mode: 'pessimistic_write' },
       })
       if (!session)
@@ -68,7 +85,7 @@ export class MemberTokenService {
         return null
 
       if (refresh.consumedAt) {
-        await this.revokeLockedSession(manager, session.id)
+        await revokeLockedSession(manager, session.id)
         // Return, do not throw: replay revocation must commit before the 401.
         return null
       }
@@ -76,11 +93,7 @@ export class MemberTokenService {
       if (session.revokedAt || refresh.revokedAt || refresh.expiresAt.getTime() <= Date.now())
         return null
 
-      const member = await manager.findOne(MemberEntity, {
-        where: { id: session.memberId, status: MemberStatus.Enabled },
-        lock: { mode: 'pessimistic_read' },
-      })
-      if (!member)
+      if (member.status !== MemberStatus.Enabled)
         return null
 
       await manager.update(MemberRefreshTokenEntity, { id: refresh.id }, { consumedAt: new Date() })
@@ -127,25 +140,33 @@ export class MemberTokenService {
   }
 
   async revokeSession(sessionId: string): Promise<void> {
+    const owner = await this.entityManager.findOneBy(MemberAccessTokenEntity, { id: sessionId })
+    if (!owner)
+      return
     await this.entityManager.transaction(async (manager) => {
+      const member = await manager.findOne(MemberEntity, {
+        where: { id: owner.memberId },
+        lock: { mode: 'pessimistic_write' },
+      })
+      if (!member)
+        return
       const session = await manager.findOne(MemberAccessTokenEntity, {
-        where: { id: sessionId },
+        where: { id: sessionId, memberId: member.id },
         lock: { mode: 'pessimistic_write' },
       })
       if (session)
-        await this.revokeLockedSession(manager, session.id)
+        await revokeLockedSession(manager, session.id)
     })
   }
 
   async revokeAll(memberId: number): Promise<void> {
     await this.entityManager.transaction(async (manager) => {
-      const sessions = await manager.find(MemberAccessTokenEntity, {
-        where: { memberId },
-        order: { id: 'ASC' },
+      const member = await manager.findOne(MemberEntity, {
+        where: { id: memberId },
         lock: { mode: 'pessimistic_write' },
       })
-      for (const session of sessions)
-        await this.revokeLockedSession(manager, session.id)
+      if (member)
+        await revokeLockedMemberSessions(manager, member.id)
     })
   }
 
@@ -179,12 +200,6 @@ export class MemberTokenService {
       createdAt: now,
     }))
     return { accessToken, refreshToken }
-  }
-
-  private async revokeLockedSession(manager: EntityManager, sessionId: string): Promise<void> {
-    const revokedAt = new Date()
-    await manager.update(MemberAccessTokenEntity, { id: sessionId }, { revokedAt })
-    await manager.update(MemberRefreshTokenEntity, { accessTokenId: sessionId }, { revokedAt })
   }
 
   private accessHash(token: string): string {

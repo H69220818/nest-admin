@@ -6,10 +6,8 @@ import { IdParam } from '~/common/decorators/id-param.decorator'
 import { ApiSecurityAuth } from '~/common/decorators/swagger.decorator'
 import { PagerDto } from '~/common/dto/pager.dto'
 import { definePermission, Perm } from '~/modules/auth/decorators/permission.decorator'
-import { MemberTokenService } from '~/modules/member-auth/services/member-token.service'
 
 import { MemberStatusUpdateDto } from './dto/member.dto'
-import { MemberStatus } from './member.constant'
 import { MemberInfo } from './member.model'
 import { MemberService } from './member.service'
 
@@ -25,7 +23,6 @@ export const permissions = definePermission('member', {
 export class MemberController {
   constructor(
     private readonly members: MemberService,
-    private readonly tokens: MemberTokenService,
   ) {}
 
   @Get()
@@ -49,7 +46,5 @@ export class MemberController {
   @Perm(permissions.UPDATE_STATUS)
   async updateStatus(@IdParam() id: number, @Body() dto: MemberStatusUpdateDto): Promise<void> {
     await this.members.updateStatus(id, dto.status)
-    if (dto.status !== MemberStatus.Enabled)
-      await this.tokens.revokeAll(id)
   }
 }

@@ -1,6 +1,6 @@
-import { createHash, randomBytes } from 'node:crypto'
+import { createHash, randomBytes, randomUUID } from 'node:crypto'
 
-import { BadRequestException, ConflictException, Inject, Injectable, NotFoundException, ServiceUnavailableException, UnauthorizedException } from '@nestjs/common'
+import { BadRequestException, ConflictException, Inject, Injectable, Logger, NotFoundException, ServiceUnavailableException, UnauthorizedException } from '@nestjs/common'
 import Redis from 'ioredis'
 import { EntityManager, Not, QueryFailedError } from 'typeorm'
 
@@ -42,6 +42,8 @@ return value
 
 @Injectable()
 export class MemberSocialService {
+  private readonly logger = new Logger(MemberSocialService.name)
+
   constructor(
     @Inject(WechatConfig.KEY) private readonly config: IWechatConfig,
     @InjectRedis() private readonly redis: Redis,
@@ -126,8 +128,17 @@ export class MemberSocialService {
             where: { unionId: identity.unionId, memberId: Not(memberId) },
             lock: { mode: 'pessimistic_write' },
           })
-          if (collision)
+          if (collision) {
+            this.logger.warn({
+              event: 'member_social_union_id_collision',
+              attemptedMemberId: memberId,
+              conflictingMemberId: collision.memberId,
+              provider: identity.provider,
+              tenant: identity.tenant,
+              correlationId: randomUUID(),
+            })
             throw new ConflictException('该微信身份已关联其他会员，请联系管理员')
+          }
         }
         const row = manager.create(MemberIdentityEntity, {
           memberId,

@@ -1,4 +1,4 @@
-import { BadGatewayException, BadRequestException, ConflictException, NotFoundException, ServiceUnavailableException, UnauthorizedException } from '@nestjs/common'
+import { BadGatewayException, BadRequestException, ConflictException, Logger, NotFoundException, ServiceUnavailableException, UnauthorizedException } from '@nestjs/common'
 import Redis from 'ioredis'
 import { EntityManager, FindOperator, QueryFailedError } from 'typeorm'
 
@@ -30,8 +30,10 @@ describe('memberSocialService', () => {
   let issue: jest.Mock
   let consumeCode: jest.Mock
   let sendCode: jest.Mock
+  let warn: jest.SpyInstance
 
   beforeEach(() => {
+    warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => {})
     members = [1, 2].map(id => Object.assign(new MemberEntity(), { id, phone: `+861380013800${id}`, status: MemberStatus.Enabled, phoneVerifiedAt: new Date(), parentId: null }))
     identities = []
     states = new Map()
@@ -82,6 +84,8 @@ describe('memberSocialService', () => {
     sendCode = jest.fn(async () => ({ success: true }))
     service = new MemberSocialService(config, redis as unknown as Redis, root as unknown as EntityManager, provider, { issue } as unknown as MemberTokenService, { consumeCode, sendCode } as unknown as SmsCodeService, miniapp)
   })
+
+  afterEach(() => warn.mockRestore())
 
   const getState = (result: { authorizationUrl: string }) => new URL(result.authorizationUrl).searchParams.get('state')!
 
@@ -278,6 +282,30 @@ describe('memberSocialService', () => {
     await expect(service.bindIdentity(2, { ...identity, provider: MemberIdentityProvider.WechatMiniapp, tenant: 'mini-app', subject: 'mini-openid' })).rejects.toBeInstanceOf(ConflictException)
     expect(identities).toHaveLength(1)
     expect(members).toHaveLength(2)
+  })
+
+  it('audits union-ID rejection with owners and a correlation ID without sensitive identity data', async () => {
+    await service.bindIdentity(1, identity)
+    await expect(service.bindIdentity(2, {
+      ...identity,
+      provider: MemberIdentityProvider.WechatMiniapp,
+      tenant: 'mini-app',
+      subject: 'private-openid',
+      code: 'private-code',
+      state: 'private-state',
+      accessToken: 'private-provider-token',
+      phone: '+8613800138002',
+    } as any)).rejects.toBeInstanceOf(ConflictException)
+    expect(warn).toHaveBeenCalledTimes(1)
+    expect(warn.mock.calls[0][0]).toEqual({
+      event: 'member_social_union_id_collision',
+      attemptedMemberId: 2,
+      conflictingMemberId: 1,
+      provider: 'wechat_miniapp',
+      tenant: 'mini-app',
+      correlationId: expect.stringMatching(/^[a-f\d]{8}(?:-[a-f\d]{4}){3}-[a-f\d]{12}$/),
+    })
+    expect(JSON.stringify(warn.mock.calls)).not.toMatch(/union-1|private-openid|private-code|private-state|private-provider-token|\+8613800138002/)
   })
 
   it('allows the same member to explicitly bind another tenant with the same union ID', async () => {

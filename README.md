@@ -245,7 +245,7 @@ NODE_ENV=production node ./node_modules/typeorm/cli.js -d ./dist/config/database
 
 会员 access 是带 `aud=member`、`tokenType=access`、`sub`、`sessionId` 的 JWT；refresh 是 64 字符随机不透明令牌。数据库只保存 access 摘要和使用独立密钥的 refresh HMAC 摘要。会员与后台令牌不能跨接口使用，会员身份仅写入 `request.member`。会员允许多设备并存，原 `MULTI_DEVICE_LOGIN` 只控制后台用户；每次登录创建独立持久会话。
 
-刷新会轮换 access/refresh，旧 access 立即失效。旧 refresh 再次使用会撤销其整个会话及最新轮换令牌，其他设备不受影响；客户端必须串行刷新，遇到网络不确定性应重新登录。`POST /member/auth/logout` 仅注销当前会话。管理员通过 `PUT /members/:id/status` 禁用或注销会员时先写状态再撤销全部会话；每次验证和刷新都会检查当前状态，因此所有旧令牌立即失效。重新启用不会恢复旧会话。后台操作权限为 `member:list`、`member:read`、`member:update-status`，按现有后台角色/菜单体系分配，超级管理员沿用已有权限规则。
+刷新会轮换 access/refresh，旧 access 立即失效。旧 refresh 再次使用会撤销其整个会话及最新轮换令牌，其他设备不受影响；客户端必须串行刷新，遇到网络不确定性应重新登录。`POST /member/auth/logout` 仅注销当前会话。管理员通过 `PUT /members/:id/status` 禁用或注销会员时，在同一事务中更新状态并撤销全部会话，任一步失败都会回滚。登录签发、刷新和状态调整按会员行、会话、refresh 的顺序加锁，防止并发登录逃过撤销；每次验证和刷新也会检查当前状态。禁用成功后所有旧令牌失效，重新启用不会恢复旧会话。后台操作权限为 `member:list`、`member:read`、`member:update-status`，按现有后台角色/菜单体系分配，超级管理员沿用已有权限规则。
 
 会员资料只允许修改昵称、邮箱、头像。生产验证管道会剥离额外字段，拒绝无效数据时返回 422；`id`、手机号、邀请码、父级、状态不能通过会员资料接口改写。业务错误沿用项目约定的响应 `code`，部分业务错误 HTTP 状态仍为 200，客户端不能只判断 HTTP 状态。
 
@@ -253,7 +253,7 @@ NODE_ENV=production node ./node_modules/typeorm/cli.js -d ./dist/config/database
 
 ### 可重复的隔离验收
 
-普通测试使用 `pnpm exec jest --runInBand`（本项目 `pnpm test -- --runInBand` 的参数转发有问题）。完整流与递归 SQL 集成测试保存在 `src/modules/member/member-flow.e2e-spec.ts`，兼容 Node 20+，默认跳过；显式启用后只读取独立的 `MEMBER_TEST_MYSQL_URL`、`MEMBER_TEST_REDIS_URL`，不使用开发环境连接配置。测试自动创建随机 `member_acceptance_*` schema，运行三步迁移并在结束时删除；Redis 所有键带随机前缀，结束时只删除自身键，不使用 FLUSHDB。MySQL 测试账号需具备 CREATE/DROP DATABASE 和测试库内 DDL/DML 权限；务必指定可丢弃的测试实例。
+普通测试使用 `pnpm exec jest --runInBand`（本项目 `pnpm test -- --runInBand` 的参数转发有问题）。完整流、会话并发撤销与递归 SQL 集成测试保存在 `src/modules/member/member-flow.e2e-spec.ts`，兼容 Node 20+，默认跳过；显式启用后只读取独立的 `MEMBER_TEST_MYSQL_URL`、`MEMBER_TEST_REDIS_URL`，不使用开发环境连接配置。测试自动创建随机 `member_acceptance_*` schema，运行三步迁移并在结束时删除；Redis 所有键带随机前缀，结束时只删除自身键，不使用 FLUSHDB。MySQL 测试账号需具备 CREATE/DROP DATABASE、测试库内 DDL/DML 和 CREATE TRIGGER 权限，并能读取 `performance_schema.data_locks` / `data_lock_waits` 来验证实际锁等待；务必指定可丢弃的测试实例。
 
 下面的 PowerShell 命令启动独立端口的测试服务，口令仅供一次性本地容器。等待 MySQL 日志出现 `ready for connections` 后运行测试；结束后删除容器及其匿名卷：
 
