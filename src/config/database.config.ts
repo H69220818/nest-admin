@@ -6,7 +6,10 @@ import { DataSource, DataSourceOptions } from 'typeorm'
 
 import { env, envBoolean, envNumber } from '~/global/env'
 
-dotenv.config({ path: `.env.${process.env.NODE_ENV}` })
+// This module builds the TypeORM options eagerly when it is imported, before
+// Nest's ConfigModule has loaded its env files. Keep the same precedence as
+// AppModule so CLI commands and application startup see identical DB values.
+dotenv.config({ path: ['.env.local', `.env.${process.env.NODE_ENV}`, '.env'] })
 
 // 当前通过 npm scripts 执行的命令
 const currentScript = process.env.npm_lifecycle_event

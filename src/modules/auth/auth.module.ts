@@ -7,6 +7,7 @@ import { TypeOrmModule } from '@nestjs/typeorm'
 
 import { ConfigKeyPaths, ISecurityConfig } from '~/config'
 import { isDev } from '~/global/env'
+import { MemberAuthModule } from '~/modules/member-auth/member-auth.module'
 
 import { LogModule } from '../system/log/log.module'
 import { MenuModule } from '../system/menu/menu.module'
@@ -55,6 +56,7 @@ const strategies = [LocalStrategy, JwtStrategy]
       inject: [ConfigService],
     }),
     UserModule,
+    MemberAuthModule,
     RoleModule,
     MenuModule,
     LogModule,
